@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -169,16 +170,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Latest-wins policy: a new connection displaces the previous session
-	// rather than being rejected. Same phone reconnecting (main app -> IME,
-	// or after Wi-Fi blip) is the common case; refusing it leaves the user
-	// staring at "connecting…" while the desktop holds a zombie socket. The
-	// rare case of two real devices means whichever just hit Connect wins.
+	log.Printf("transport: ws upgrade ok from %s", r.RemoteAddr)
 	s.mu.Lock()
 	if prev := s.session; prev != nil {
-		// Notify the displaced client politely, then close. Holding s.mu
-		// during conn.Close is fine — gorilla's Close just flips a flag and
-		// shuts the underlying TCP; no callbacks into us.
+		log.Printf("transport: displacing previous session deviceId=%q", prev.deviceID)
 		_ = prev.conn.WriteJSON(protocol.Message{
 			V: protocol.Version, Type: protocol.TypeError,
 			Data: mustMarshal(protocol.ErrorPayload{Code: "displaced", Message: "another device just connected"}),
@@ -199,14 +194,35 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	conn.SetReadLimit(64 * 1024)
-	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	const readDeadline = 90 * time.Second
+	_ = conn.SetReadDeadline(time.Now().Add(readDeadline))
+	// Client (Dart's IOWebSocketChannel) sends WS pings every 20 s. Gorilla's
+	// default ping handler auto-sends a pong but does NOT refresh the read
+	// deadline, so without this override the server kills the socket at the
+	// 90 s mark even on a perfectly healthy connection.
+	conn.SetPingHandler(func(appData string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(readDeadline))
+		err := conn.WriteControl(websocket.PongMessage, []byte(appData),
+			time.Now().Add(10*time.Second))
+		if err == websocket.ErrCloseSent {
+			return nil
+		}
+		return err
+	})
 	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return conn.SetReadDeadline(time.Now().Add(readDeadline))
 	})
 
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
+			// Distinguish "client closed cleanly" from "we timed them out" so
+			// the cause of a mysterious disconnect is visible in logs.
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				log.Printf("transport: client closed: %v", err)
+			} else {
+				log.Printf("transport: read loop ended: %v", err)
+			}
 			return
 		}
 		var msg protocol.Message
@@ -272,6 +288,8 @@ func (s *Server) handleHello(sess *session, msg protocol.Message) {
 	}
 	sess.deviceID = p.DeviceID
 	sess.deviceName = p.DeviceName
+	log.Printf("transport: hello device=%q (id=%s) hasToken=%t",
+		p.DeviceName, p.DeviceID, p.Token != "")
 
 	if s.pairing == nil {
 		// No-auth mode: useful for unit tests.
@@ -289,6 +307,7 @@ func (s *Server) handleHello(sess *session, msg protocol.Message) {
 	switch {
 	case result.Authed:
 		sess.authed = true
+		log.Printf("transport: authed via token device=%q", p.DeviceName)
 		s.publishStatus()
 		sendJSON(sess, protocol.Message{
 			V: protocol.Version, Type: protocol.TypePairResult,
@@ -325,9 +344,12 @@ func (s *Server) handlePairPin(sess *session, msg protocol.Message) {
 	ok, token, code := s.pairing.HandlePIN(sess.deviceID, p.PIN)
 	if ok {
 		sess.authed = true
+		log.Printf("transport: authed via PIN device=%q", sess.deviceName)
 		if s.onAuth != nil {
 			go s.onAuth()
 		}
+	} else {
+		log.Printf("transport: PIN check failed device=%q code=%s", sess.deviceName, code)
 	}
 	s.publishStatus()
 	sendJSON(sess, protocol.Message{
@@ -356,13 +378,15 @@ func (s *Server) closeSession(reason string) {
 	s.session = nil
 	s.mu.Unlock()
 	if sess != nil {
+		dur := time.Since(sess.connectedAt).Truncate(time.Second)
+		log.Printf("transport: session closed device=%q reason=%s lasted=%s",
+			sess.deviceName, reason, dur)
 		_ = sess.conn.Close()
 	}
 	if s.pairing != nil {
 		s.pairing.Reset()
 	}
 	s.publishStatus()
-	_ = reason
 }
 
 func (s *Server) publishStatus() {

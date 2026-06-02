@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -42,6 +43,9 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
 
   _Dest _dest = _Dest.phone;
   bool _listening = false;
+  // Buffer contents at the moment the current ASR session started; the new
+  // utterance is appended to this so successive recordings accumulate.
+  String _sessionPrefix = '';
   String? _status;
   WsState _wsState = WsState.disconnected;
   String? _hostApp;
@@ -49,13 +53,19 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
   @override
   void initState() {
     super.initState();
+    debugPrint('[ImeView] initState');
     _init();
   }
 
   Future<void> _init() async {
+    debugPrint('[ImeView] _init begin');
     _tokens = await TokenStore.open();
+    debugPrint('[ImeView] token store opened');
     _ws = WsClient(tokens: _tokens!, deviceName: 'MobileIME');
-    _wsStateSub = _ws!.states.listen((s) => setState(() => _wsState = s));
+    _wsStateSub = _ws!.states.listen((s) {
+      debugPrint('[ImeView] ws state -> $s');
+      setState(() => _wsState = s);
+    });
 
     _imeSub = _ime.events.listen((e) {
       if (e.kind == ImeEventKind.start) {
@@ -82,6 +92,7 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
       (_dest == _Dest.phone || _wsState == WsState.authed);
 
   Future<void> _toggleListen() async {
+    debugPrint('[ImeView] mic tap (currently listening=$_listening)');
     if (_listening) {
       await _speech.stop();
       setState(() => _listening = false);
@@ -101,17 +112,21 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
       _listening = true;
       _status = 'Listening…';
     });
+    _sessionPrefix = _bufferCtrl.text;
     _speechSub?.cancel();
     _speechSub = _speech.start().listen((ev) {
       switch (ev.kind) {
         case SpeechEventKind.partial:
-          _bufferCtrl.text = ev.text;
-          _bufferCtrl.selection = TextSelection.collapsed(offset: ev.text.length);
+          final combined = _joinSegment(_sessionPrefix, ev.text);
+          _bufferCtrl.text = combined;
+          _bufferCtrl.selection = TextSelection.collapsed(offset: combined.length);
           setState(() => _status = 'Hearing… ${ev.text.length}c');
           break;
         case SpeechEventKind.finalResult:
-          _bufferCtrl.text = ev.text;
-          _bufferCtrl.selection = TextSelection.collapsed(offset: ev.text.length);
+          final combined = _joinSegment(_sessionPrefix, ev.text);
+          _bufferCtrl.text = combined;
+          _bufferCtrl.selection = TextSelection.collapsed(offset: combined.length);
+          _sessionPrefix = combined;
           setState(() {
             _listening = false;
             _status = 'Ready';
@@ -135,8 +150,38 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
     });
   }
 
+  // See [VoiceKeyboardPage._joinSegment] — keeps consecutive ASR sessions
+  // glued together with a sensible separator (or none, for CJK).
+  String _joinSegment(String prefix, String segment) {
+    if (prefix.isEmpty) return segment;
+    if (segment.isEmpty) return prefix;
+    final lastCode = prefix.codeUnitAt(prefix.length - 1);
+    if (_isBoundaryChar(lastCode)) return prefix + segment;
+    final firstCode = segment.codeUnitAt(0);
+    if (_isCjk(lastCode) || _isCjk(firstCode)) return prefix + segment;
+    return '$prefix $segment';
+  }
+
+  bool _isBoundaryChar(int c) {
+    if (c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D) return true;
+    const punct = {
+      0x2C, 0x2E, 0x21, 0x3F, 0x3B, 0x3A,
+      0x3001, 0x3002, 0xFF0C, 0xFF1F, 0xFF01, 0xFF1B, 0xFF1A,
+      0x2026, 0x2014,
+    };
+    return punct.contains(c);
+  }
+
+  bool _isCjk(int c) {
+    return (c >= 0x4E00 && c <= 0x9FFF) ||
+        (c >= 0x3400 && c <= 0x4DBF) ||
+        (c >= 0x3040 && c <= 0x30FF) ||
+        (c >= 0xAC00 && c <= 0xD7AF);
+  }
+
   Future<void> _send() async {
     final text = _bufferCtrl.text;
+    debugPrint('[ImeView] send dest=$_dest len=${text.length}');
     if (text.isEmpty) return;
     if (_dest == _Dest.phone) {
       await _ime.commitText(text);

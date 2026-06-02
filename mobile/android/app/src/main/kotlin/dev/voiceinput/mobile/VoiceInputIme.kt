@@ -52,23 +52,27 @@ class VoiceInputIme : InputMethodService() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "onCreate")
+        Log.i(TAG, "onCreate / pid=${android.os.Process.myPid()}")
         // Strip the default IME panel background so the area above our 260dp
         // keyboard is visually transparent (combined with onComputeInsets, the
         // host app shows through and gets touch events).
         window?.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         engine = obtainEngine(this)
-        Log.i(TAG, "engine obtained: $engine")
+        Log.i(TAG, "engine obtained: $engine running=${engine?.dartExecutor?.isExecutingDart}")
         channel = MethodChannel(engine!!.dartExecutor.binaryMessenger, CHANNEL).apply {
             setMethodCallHandler { call, result ->
+                Log.d(TAG, "<- dart call: ${call.method}")
                 when (call.method) {
                     "commitText" -> {
                         val text = call.argument<String>("text") ?: ""
+                        Log.d(TAG, "commitText len=${text.length} ic=${currentInputConnection != null}")
                         currentInputConnection?.commitText(text, 1)
                         result.success(true)
                     }
                     "commitKey" -> {
-                        when (call.argument<String>("name")) {
+                        val name = call.argument<String>("name")
+                        Log.d(TAG, "commitKey $name")
+                        when (name) {
                             "enter" -> currentInputConnection?.commitText("\n", 1)
                             "tab" -> currentInputConnection?.commitText("\t", 1)
                             "space" -> currentInputConnection?.commitText(" ", 1)
@@ -77,14 +81,14 @@ class VoiceInputIme : InputMethodService() {
                         result.success(true)
                     }
                     "clearAll" -> {
-                        // Select-all + delete works in most editors; ExtractedText
-                        // would be more reliable but requires extra round-trips.
+                        Log.d(TAG, "clearAll")
                         currentInputConnection?.performContextMenuAction(android.R.id.selectAll)
                         currentInputConnection?.commitText("", 1)
                         result.success(true)
                     }
                     "switchToPreviousIme" -> {
                         val handled = switchToPreviousInputMethod()
+                        Log.d(TAG, "switchToPreviousIme handled=$handled")
                         if (!handled) showImePicker()
                         result.success(handled)
                     }
@@ -119,7 +123,16 @@ class VoiceInputIme : InputMethodService() {
         val topInset = (windowH - panelPx).coerceAtLeast(0)
         outInsets.contentTopInsets = topInset
         outInsets.visibleTopInsets = topInset
-        outInsets.touchableInsets = InputMethodService.Insets.TOUCHABLE_INSETS_CONTENT
+        // FRAME makes the entire IME window touchable. Previously we used
+        // CONTENT (only below contentTopInsets), but if windowH ever lags
+        // behind layout (e.g. fresh activation), the touchable region ends
+        // up either too small or above our content, which manifests as
+        // "I can see the keyboard but taps do nothing." FRAME is safer; the
+        // host app already shows behind the transparent area via the
+        // visible/content insets, and the rare cost is we capture the
+        // upper-region taps even though we render nothing there.
+        outInsets.touchableInsets = InputMethodService.Insets.TOUCHABLE_INSETS_FRAME
+        Log.d(TAG, "onComputeInsets windowH=$windowH panel=$panelPx topInset=$topInset")
     }
 
     override fun onCreateInputView(): View {
@@ -135,9 +148,6 @@ class VoiceInputIme : InputMethodService() {
                 height,
             )
         }
-        // isOpaque=false lets Dart-side transparent regions (the area above
-        // our 260dp panel) show the host app underneath, instead of a solid
-        // grey block. Without this the IME panel always paints fully opaque.
         val textureView = FlutterTextureView(this).apply { isOpaque = false }
         val view = FlutterView(this, textureView)
         view.layoutParams = FrameLayout.LayoutParams(
@@ -147,8 +157,40 @@ class VoiceInputIme : InputMethodService() {
         flutterView = view
         view.attachToFlutterEngine(engine!!)
         container.addView(view)
-        Log.i(TAG, "view attached: height=${height}px")
+        // Make the container's touch handling absolutely permissive — sometimes
+        // a parent ViewGroup intercepts touches before they reach the Flutter
+        // surface, leaving the user staring at unclickable buttons. Logging
+        // the touchstream from both layers makes that obvious in logcat.
+        container.setOnTouchListener { _, ev ->
+            if (ev.action == android.view.MotionEvent.ACTION_DOWN) {
+                Log.d(TAG, "container TOUCH down @ (${ev.x}, ${ev.y})")
+            }
+            false
+        }
+        view.setOnTouchListener { _, ev ->
+            if (ev.action == android.view.MotionEvent.ACTION_DOWN) {
+                Log.d(TAG, "flutterView TOUCH down @ (${ev.x}, ${ev.y})")
+            }
+            false
+        }
+        Log.i(TAG, "view attached height=${height}px engineRunning=${engine?.dartExecutor?.isExecutingDart}")
         return container
+    }
+
+    override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        Log.i(TAG, "onStartInputView pkg=${info?.packageName} restarting=$restarting")
+    }
+
+    override fun onWindowShown() {
+        super.onWindowShown()
+        val w = window?.window
+        Log.i(TAG, "onWindowShown decorH=${w?.decorView?.height} attrs=${w?.attributes}")
+    }
+
+    override fun onWindowHidden() {
+        super.onWindowHidden()
+        Log.i(TAG, "onWindowHidden")
     }
 
     override fun onStartInput(info: EditorInfo?, restarting: Boolean) {

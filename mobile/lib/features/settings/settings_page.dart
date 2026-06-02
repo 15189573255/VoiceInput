@@ -77,7 +77,7 @@ class _SettingsPageState extends State<SettingsPage> {
     await widget.speechStore.save(_speechDraft);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Saved'), duration: Duration(seconds: 1)),
+        SnackBar(content: Text(tr('common.saved')), duration: const Duration(seconds: 1)),
       );
     }
   }
@@ -116,12 +116,12 @@ class _SettingsPageState extends State<SettingsPage> {
     final cs = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Settings'),
+        title: Text(tr('common.settings')),
         centerTitle: false,
         backgroundColor: cs.surface,
         elevation: 0,
         actions: [
-          TextButton(onPressed: _save, child: const Text('Save')),
+          TextButton(onPressed: _save, child: Text(tr('common.save'))),
         ],
       ),
       body: ListView(
@@ -141,18 +141,22 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 16),
           _Section(
-            title: 'Speech engine (ASR)',
-            subtitle: 'Where transcription happens. System uses the OEM speech recognizer (offline-capable on most devices). Whisper sends audio to any OpenAI-compatible /v1/audio/transcriptions endpoint.',
+            title: tr('set.speechSection'),
+            subtitle: tr('set.speechSub'),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 DropdownButtonFormField<SpeechEngineKind>(
                   initialValue: _speechDraft.engine,
                   isExpanded: true,
-                  decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true, labelText: 'Engine'),
+                  decoration: InputDecoration(
+                      border: const OutlineInputBorder(),
+                      isDense: true,
+                      labelText: tr('set.engine')),
                   items: [
-                    for (final e in SpeechEngineKind.values)
-                      DropdownMenuItem(value: e, child: Text(e.label)),
+                    DropdownMenuItem(value: SpeechEngineKind.system,     child: Text(tr('set.engineSystem'))),
+                    DropdownMenuItem(value: SpeechEngineKind.whisper,    child: Text(tr('set.engineWhisper'))),
+                    DropdownMenuItem(value: SpeechEngineKind.volcengine, child: Text(tr('set.engineVolcengine'))),
                   ],
                   onChanged: (v) => setState(() => _speechDraft.engine = v ?? SpeechEngineKind.system),
                 ),
@@ -160,7 +164,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   const SizedBox(height: 10),
                   TextFormField(
                     initialValue: _speechDraft.whisperBaseUrl,
-                    decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true, labelText: 'Base URL', hintText: 'https://api.openai.com/v1'),
+                    decoration: InputDecoration(border: const OutlineInputBorder(), isDense: true, labelText: tr('set.baseUrl'), hintText: 'https://api.openai.com/v1'),
                     onChanged: (v) => _speechDraft.whisperBaseUrl = v,
                     keyboardType: TextInputType.url,
                     autocorrect: false,
@@ -168,7 +172,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   const SizedBox(height: 10),
                   TextFormField(
                     initialValue: _speechDraft.whisperModel,
-                    decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true, labelText: 'Model', hintText: 'whisper-1'),
+                    decoration: InputDecoration(border: const OutlineInputBorder(), isDense: true, labelText: tr('set.model'), hintText: 'whisper-1'),
                     onChanged: (v) => _speechDraft.whisperModel = v,
                     autocorrect: false,
                   ),
@@ -179,7 +183,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     decoration: InputDecoration(
                       border: const OutlineInputBorder(),
                       isDense: true,
-                      labelText: 'API key',
+                      labelText: tr('set.apiKey'),
                       suffixIcon: IconButton(
                         icon: Icon(_revealKey ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 18),
                         onPressed: () => setState(() => _revealKey = !_revealKey),
@@ -191,7 +195,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   const SizedBox(height: 10),
                   TextFormField(
                     initialValue: _speechDraft.whisperLanguage,
-                    decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true, labelText: 'Language (ISO 639-1)', hintText: 'zh, en, ja, ko, …'),
+                    decoration: InputDecoration(border: const OutlineInputBorder(), isDense: true, labelText: tr('set.language'), hintText: 'zh, en, ja, ko, …'),
                     onChanged: (v) => _speechDraft.whisperLanguage = v,
                     autocorrect: false,
                   ),
@@ -248,7 +252,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Hotwords from your Dictionary tab are auto-injected into the ASR config to preserve domain terms.',
+                    tr('set.vcHint'),
                     style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant),
                   ),
                 ],
@@ -257,12 +261,12 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 16),
           _Section(
-            title: 'Polish Provider',
-            subtitle: 'Voice → ASR → Polish → Send. The provider config and API key stay on this device.',
+            title: tr('set.polishSection'),
+            subtitle: tr('set.polishSub'),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _label('Quick presets'),
+                _label(tr('set.presets')),
                 const SizedBox(height: 6),
                 Wrap(
                   spacing: 6,
@@ -276,21 +280,21 @@ class _SettingsPageState extends State<SettingsPage> {
                   ],
                 ),
                 const SizedBox(height: 14),
-                _label('Protocol'),
+                _label(tr('set.protocol')),
                 const SizedBox(height: 4),
                 DropdownButtonFormField<PolishProtocol>(
                   initialValue: _draft.protocol,
                   isExpanded: true,
                   decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true),
-                  items: const [
-                    DropdownMenuItem(value: PolishProtocol.none, child: Text('Disabled (raw only)')),
-                    DropdownMenuItem(value: PolishProtocol.openai, child: Text('OpenAI-compatible (Chat Completions)')),
-                    DropdownMenuItem(value: PolishProtocol.anthropic, child: Text('Anthropic (Messages API)')),
+                  items: [
+                    DropdownMenuItem(value: PolishProtocol.none,      child: Text(tr('set.protoNone'))),
+                    DropdownMenuItem(value: PolishProtocol.openai,    child: Text(tr('set.protoOpenAI'))),
+                    DropdownMenuItem(value: PolishProtocol.anthropic, child: Text(tr('set.protoAnthropic'))),
                   ],
                   onChanged: (v) => setState(() => _draft.protocol = v ?? PolishProtocol.none),
                 ),
                 const SizedBox(height: 10),
-                _label('Display name (optional)'),
+                _label(tr('set.displayName')),
                 const SizedBox(height: 4),
                 TextFormField(
                   initialValue: _draft.displayName,
@@ -298,7 +302,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   onChanged: (v) => _draft.displayName = v,
                 ),
                 const SizedBox(height: 10),
-                _label('Base URL'),
+                _label(tr('set.baseUrl')),
                 const SizedBox(height: 4),
                 TextFormField(
                   initialValue: _draft.baseUrl,
@@ -308,7 +312,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   autocorrect: false,
                 ),
                 const SizedBox(height: 10),
-                _label('Model'),
+                _label(tr('set.model')),
                 const SizedBox(height: 4),
                 TextFormField(
                   initialValue: _draft.model,
@@ -317,7 +321,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   autocorrect: false,
                 ),
                 const SizedBox(height: 10),
-                _label('API key'),
+                _label(tr('set.apiKey')),
                 const SizedBox(height: 4),
                 TextFormField(
                   initialValue: _draft.apiKey,
@@ -335,7 +339,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   autocorrect: false,
                 ),
                 const SizedBox(height: 10),
-                _label('Default polish mode'),
+                _label(tr('set.defaultMode')),
                 const SizedBox(height: 4),
                 DropdownButtonFormField<PolishMode>(
                   initialValue: _draft.defaultMode,
@@ -343,7 +347,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true),
                   items: [
                     for (final m in PolishMode.values)
-                      DropdownMenuItem(value: m, child: Text(_modeLabel(m))),
+                      DropdownMenuItem(value: m, child: Text(_modeLabelTr(m))),
                   ],
                   onChanged: (v) => setState(() => _draft.defaultMode = v ?? PolishMode.light),
                 ),
@@ -352,24 +356,24 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 16),
           _Section(
-            title: 'Smoke test',
-            subtitle: 'Run the current provider on a sample sentence — verifies key + endpoint + model in one shot.',
+            title: tr('set.testSection'),
+            subtitle: tr('set.testSub'),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 TextFormField(
                   controller: _sampleCtrl,
-                  decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true, labelText: 'Sample text'),
+                  decoration: InputDecoration(border: const OutlineInputBorder(), isDense: true, labelText: tr('set.testSample')),
                   maxLines: 2,
                 ),
                 const SizedBox(height: 10),
                 DropdownButtonFormField<PolishMode>(
                   initialValue: _testMode,
                   isExpanded: true,
-                  decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true, labelText: 'Test mode'),
+                  decoration: InputDecoration(border: const OutlineInputBorder(), isDense: true, labelText: tr('set.testMode')),
                   items: [
                     for (final m in PolishMode.values.where((m) => m != PolishMode.raw))
-                      DropdownMenuItem(value: m, child: Text(_modeLabel(m))),
+                      DropdownMenuItem(value: m, child: Text(_modeLabelTr(m))),
                   ],
                   onChanged: (v) => setState(() => _testMode = v ?? PolishMode.light),
                 ),
@@ -378,7 +382,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   icon: _testing
                       ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
                       : const Icon(Icons.play_arrow_rounded, size: 18),
-                  label: Text(_testing ? 'Running…' : 'Run test'),
+                  label: Text(_testing ? tr('set.testRunning') : tr('set.testRun')),
                   onPressed: (_testing || !_draft.isConfigured) ? null : _test,
                 ),
                 if (_testOut != null) ...[
@@ -411,12 +415,12 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 }
 
-String _modeLabel(PolishMode m) {
+String _modeLabelTr(PolishMode m) {
   switch (m) {
-    case PolishMode.raw:        return 'Raw — pass through';
-    case PolishMode.light:      return 'Light — fix grammar';
-    case PolishMode.structured: return 'Structured — clean prompt';
-    case PolishMode.formal:     return 'Formal — professional tone';
+    case PolishMode.raw:        return '${tr('polish.raw')} — ${tr('polish.rawDesc')}';
+    case PolishMode.light:      return '${tr('polish.light')} — ${tr('polish.lightDesc')}';
+    case PolishMode.structured: return '${tr('polish.structured')} — ${tr('polish.structuredDesc')}';
+    case PolishMode.formal:     return '${tr('polish.formal')} — ${tr('polish.formalDesc')}';
   }
 }
 

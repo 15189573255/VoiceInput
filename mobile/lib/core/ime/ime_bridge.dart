@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Dart-side bridge to the native VoiceInputIme service.
@@ -12,6 +13,7 @@ class ImeBridge {
   static const _channel = MethodChannel('voiceinput/ime');
 
   ImeBridge() {
+    debugPrint('[ImeBridge] ctor — registering channel handler on $_channel');
     _channel.setMethodCallHandler(_onCall);
   }
 
@@ -19,6 +21,7 @@ class ImeBridge {
   Stream<ImeEvent> get events => _eventsCtrl.stream;
 
   Future<void> _onCall(MethodCall call) async {
+    debugPrint('[ImeBridge] <- ${call.method} ${call.arguments}');
     switch (call.method) {
       case 'onStartInput':
         final args = (call.arguments as Map?)?.cast<String, dynamic>() ?? const {};
@@ -34,18 +37,30 @@ class ImeBridge {
     }
   }
 
-  Future<void> commitText(String text) =>
-      _channel.invokeMethod('commitText', {'text': text});
+  Future<void> commitText(String text) {
+    debugPrint('[ImeBridge] -> commitText len=${text.length}');
+    return _channel.invokeMethod('commitText', {'text': text});
+  }
 
-  Future<void> commitKey(String name) =>
-      _channel.invokeMethod('commitKey', {'name': name});
+  Future<void> commitKey(String name) {
+    debugPrint('[ImeBridge] -> commitKey $name');
+    return _channel.invokeMethod('commitKey', {'name': name});
+  }
 
-  Future<void> clearAll() => _channel.invokeMethod('clearAll');
+  Future<void> clearAll() {
+    debugPrint('[ImeBridge] -> clearAll');
+    return _channel.invokeMethod('clearAll');
+  }
 
-  Future<bool> switchToPreviousIme() async =>
-      (await _channel.invokeMethod<bool>('switchToPreviousIme')) ?? false;
+  Future<bool> switchToPreviousIme() async {
+    debugPrint('[ImeBridge] -> switchToPreviousIme');
+    return (await _channel.invokeMethod<bool>('switchToPreviousIme')) ?? false;
+  }
 
-  Future<void> showImePicker() => _channel.invokeMethod('showImePicker');
+  Future<void> showImePicker() {
+    debugPrint('[ImeBridge] -> showImePicker');
+    return _channel.invokeMethod('showImePicker');
+  }
 }
 
 class ImeEvent {

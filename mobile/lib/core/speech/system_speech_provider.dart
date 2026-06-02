@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import 'speech_provider.dart';
@@ -17,6 +18,14 @@ class SystemSpeechProvider implements SpeechProvider {
   // if the engine reports done without ever delivering a true final.
   String _lastPartial = '';
   bool _finalEmitted = false;
+  // Remember the locale of the current session so an in-session transient
+  // retry (e.g. on error_network_timeout) can re-listen with the same locale
+  // without needing a fresh start() call from the UI.
+  String _currentLocale = 'zh_CN';
+  // Whether we've already burned the single allowed transient retry for the
+  // current session. Reset on every start(), so each user tap gets at most
+  // one silent retry — never an infinite loop.
+  bool _retriedTransient = false;
 
   @override
   String? get lastError => _lastError;
@@ -27,10 +36,30 @@ class SystemSpeechProvider implements SpeechProvider {
     try {
       _initialized = await _engine.initialize(
         onError: (e) {
+          debugPrint('[SystemASR] error msg=${e.errorMsg} permanent=${e.permanent}');
           _lastError = e.errorMsg;
+          // Some errors are transient — most notably error_network_timeout,
+          // which Google's on-device shim emits after the recognizer has been
+          // idle for a while (cold-start handshake with the speech service
+          // takes longer than its 5 s budget). On the second attempt it
+          // almost always succeeds, so we silently restart once per session
+          // instead of surfacing a failure the user has to tap through.
+          final ctrl = _ctrl;
+          if (ctrl != null && !ctrl.isClosed &&
+              !_retriedTransient && _isTransient(e.errorMsg)) {
+            _retriedTransient = true;
+            debugPrint('[SystemASR] transient "${e.errorMsg}", silent retry');
+            Future.delayed(const Duration(milliseconds: 300), () {
+              final c = _ctrl;
+              if (c == null || c.isClosed) return;
+              _startListen(c, _currentLocale);
+            });
+            return;
+          }
           _ctrl?.add(SpeechEvent.error(e.errorMsg));
         },
         onStatus: (status) {
+          debugPrint('[SystemASR] status=$status');
           // "done" / "doneNoResult" both signal the engine has fully stopped.
           // On MIUI mibrain the timing is: doneNoResult -> 200-1000ms ->
           // actual onResult callback. We emit done unconditionally so the UI
@@ -68,6 +97,8 @@ class SystemSpeechProvider implements SpeechProvider {
     _ctrl = ctrl;
     _lastPartial = '';
     _finalEmitted = false;
+    _currentLocale = locale;
+    _retriedTransient = false;
     // Fire-and-forget: ensure any prior session is fully released before
     // calling listen() again. MIUI's mibrain otherwise returns ERROR_CLIENT
     // (5) when a stale listener is still attached.
@@ -75,19 +106,29 @@ class SystemSpeechProvider implements SpeechProvider {
     return ctrl.stream;
   }
 
+  bool _isTransient(String msg) {
+    // Google's online recognizer surfaces these whenever the handshake to the
+    // speech service hasn't been kept warm; a single retry recovers the
+    // session. error_busy can also show up if a prior cancel hasn't settled.
+    return msg.contains('error_network_timeout') ||
+        msg.contains('error_network') ||
+        msg.contains('error_busy');
+  }
+
   Future<void> _startListen(
       StreamController<SpeechEvent> ctrl, String locale) async {
+    debugPrint('[SystemASR] startListen locale=$locale wasListening=${_engine.isListening}');
     if (_engine.isListening) {
       await _engine.cancel();
-      // Small breathing room for the system recogniser to release its bind.
       await Future.delayed(const Duration(milliseconds: 200));
     }
     _engine.listen(
       listenOptions: stt.SpeechListenOptions(
-        // Keep the recogniser open long enough for MIUI's mibrain to deliver
-        // its final result after onEndOfSpeech. Default pauseFor (~3s) is too
-        // short on this stack and causes silently-dropped results.
-        listenFor: const Duration(seconds: 30),
+        // Allow up to 2 minutes of continuous dictation. The default 30 s
+        // was clipping anyone who tried to dictate a longer thought; partials
+        // keep coming the whole time so the safety watchdog upstream still
+        // protects against stuck sessions.
+        listenFor: const Duration(seconds: 120),
         pauseFor: const Duration(seconds: 5),
         partialResults: true,
         listenMode: stt.ListenMode.dictation,
@@ -95,6 +136,7 @@ class SystemSpeechProvider implements SpeechProvider {
         localeId: locale,
       ),
       onResult: (r) {
+        debugPrint('[SystemASR] onResult final=${r.finalResult} words="${r.recognizedWords}"');
         if (r.finalResult) {
           _finalEmitted = true;
           ctrl.add(SpeechEvent.finalResult(r.recognizedWords));

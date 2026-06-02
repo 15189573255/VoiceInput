@@ -1,18 +1,12 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/status.dart' as ws_status;
 
 import '../protocol/messages.dart';
 import 'token_store.dart';
 
-/// Lifecycle of a connection to the desktop receiver.
-///
-/// connecting -> awaitingPin: server replied to hello with NeedPIN.
-/// connecting -> authed     : server replied to hello with OK + token.
-/// awaitingPin -> authed    : user typed correct PIN.
-/// awaitingPin -> locked    : 3 wrong PIN attempts.
-/// any -> disconnected      : socket dropped or stop() called.
 enum WsState { disconnected, connecting, awaitingPin, authed, locked }
 
 class PairingError {
@@ -38,6 +32,14 @@ class WsClient {
   String? _currentHost;
   int? _currentPort;
 
+  // Auto-reconnect state. Once a session reaches `authed`, we treat the next
+  // unexpected close as a transient blip and retry with backoff. Surrendering
+  // here is preferable to silently disconnecting the user mid-dictation.
+  bool _wasAuthed = false;
+  int _reconnectAttempts = 0;
+  Timer? _reconnectTimer;
+  static const _maxReconnects = 3;
+
   WsClient({required this.tokens, this.deviceName = 'Mobile'});
 
   WsState get state => _state;
@@ -46,7 +48,8 @@ class WsClient {
   Stream<PairingError> get errors => _errorCtrl.stream;
 
   Future<void> connect(String host, int port) async {
-    await disconnect();
+    _log('connect host=$host port=$port');
+    await disconnect(intentional: true);
     _setState(WsState.connecting);
     _currentHost = host;
     _currentPort = port;
@@ -55,8 +58,14 @@ class WsClient {
       _channel = IOWebSocketChannel.connect(uri, pingInterval: const Duration(seconds: 20));
       _sub = _channel!.stream.listen(
         _onRaw,
-        onError: (_) => _onClosed(),
-        onDone: _onClosed,
+        onError: (e) {
+          _log('socket error: $e');
+          _onClosed();
+        },
+        onDone: () {
+          _log('socket done (close code=${_channel?.closeCode}, reason=${_channel?.closeReason})');
+          _onClosed();
+        },
         cancelOnError: true,
       );
       // Fire the hello as soon as the socket is open. If we have a stored
@@ -70,6 +79,7 @@ class WsClient {
       if (token != null) hello['token'] = token;
       _send(Envelope(type: MsgType.hello, data: hello));
     } catch (e) {
+      _log('connect threw: $e');
       _setState(WsState.disconnected);
       rethrow;
     }
@@ -87,15 +97,23 @@ class WsClient {
     _send(env);
   }
 
-  Future<void> disconnect() async {
+  Future<void> disconnect({bool intentional = true}) async {
+    if (intentional) {
+      _wasAuthed = false;
+      _reconnectAttempts = 0;
+      _reconnectTimer?.cancel();
+      _reconnectTimer = null;
+    }
     await _sub?.cancel();
     _sub = null;
     if (_channel != null) {
       await _channel!.sink.close(ws_status.normalClosure);
       _channel = null;
     }
-    _currentHost = null;
-    _currentPort = null;
+    if (intentional) {
+      _currentHost = null;
+      _currentPort = null;
+    }
     _setState(WsState.disconnected);
   }
 
@@ -112,6 +130,13 @@ class WsClient {
       return;
     }
 
+    if (env.type == MsgType.error) {
+      final d = env.data ?? const {};
+      final code = d['code']?.toString() ?? '';
+      _log('server error: $code / ${d['message']}');
+      return;
+    }
+
     if (env.type == MsgType.pairResult) {
       final d = env.data ?? const {};
       final ok = d['ok'] == true;
@@ -123,10 +148,12 @@ class WsClient {
           if (token != null && token.isNotEmpty) {
             tokens.save(_currentHost!, _currentPort!, token);
           }
-          // Remember as last successful peer so the IME can auto-connect.
           tokens.setLastPeer(_currentHost!, _currentPort!);
         }
+        _wasAuthed = true;
+        _reconnectAttempts = 0;
         _setState(WsState.authed);
+        _log('authed');
       } else if (code == 'locked') {
         _setState(WsState.locked);
         _errorCtrl.add(PairingError('locked', 'Too many wrong PINs; device locked for 60 s.'));
@@ -135,7 +162,6 @@ class WsClient {
         if (code == 'invalid_pin') {
           _errorCtrl.add(PairingError('invalid_pin', 'Wrong PIN, try again.'));
         } else if (code == 'bad_token') {
-          // The stored token is no longer accepted (desktop forgot us).
           if (_currentHost != null && _currentPort != null) {
             tokens.forget(_currentHost!, _currentPort!);
           }
@@ -153,19 +179,47 @@ class WsClient {
     _sub?.cancel();
     _sub = null;
     _channel = null;
-    _currentHost = null;
-    _currentPort = null;
+    final host = _currentHost;
+    final port = _currentPort;
     _setState(WsState.disconnected);
+
+    // If we were authed and the user hasn't explicitly disconnected, try a few
+    // automatic reconnects. Common causes covered:
+    //   - server's "latest-wins" temporarily kicked us;
+    //   - Wi-Fi roamed / momentarily dropped;
+    //   - desktop process briefly restarted.
+    if (_wasAuthed && host != null && port != null && _reconnectAttempts < _maxReconnects) {
+      _reconnectAttempts++;
+      final delayMs = 600 * _reconnectAttempts;
+      _log('reconnect scheduled #$_reconnectAttempts in ${delayMs}ms');
+      _reconnectTimer?.cancel();
+      _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
+        if (_state == WsState.disconnected) {
+          connect(host, port).catchError((e) {
+            _log('reconnect attempt failed: $e');
+          });
+        }
+      });
+    } else {
+      _wasAuthed = false;
+      _reconnectAttempts = 0;
+    }
   }
 
   void _setState(WsState s) {
     if (_state == s) return;
+    _log('state: $_state -> $s');
     _state = s;
     _stateCtrl.add(s);
   }
 
+  void _log(String msg) {
+    if (kDebugMode) debugPrint('[WsClient] $msg');
+  }
+
   void dispose() {
-    disconnect();
+    _reconnectTimer?.cancel();
+    disconnect(intentional: true);
     _stateCtrl.close();
     _msgCtrl.close();
     _errorCtrl.close();
