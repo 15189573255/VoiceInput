@@ -1,6 +1,7 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/io.dart';
@@ -59,7 +60,15 @@ class VolcengineSpeechProvider implements SpeechProvider {
       _lastError = 'Volcengine app id / access key missing';
       return false;
     }
-    if (!await _recorder.hasPermission()) {
+    // Check via permission_handler, NOT _recorder.hasPermission(): the `record`
+    // plugin's PermissionManager returns false whenever no Activity is attached
+    // (PermissionManager.kt: `if (activity == null) onResult(false)`), which is
+    // ALWAYS the case in the IME engine — it's started from a Service and never
+    // bound to an Activity. That false negative was the real cause of the IME
+    // mic reporting "Microphone permission denied" even though RECORD_AUDIO is
+    // granted. permission_handler queries the application context, so it reports
+    // the true grant state in both the main app and the IME.
+    if (!await Permission.microphone.isGranted) {
       _lastError = 'Microphone permission denied';
       return false;
     }
@@ -83,8 +92,16 @@ class VolcengineSpeechProvider implements SpeechProvider {
   Future<void> _startSession(StreamController<SpeechEvent> ctrl) async {
     final reqId = const Uuid().v4();
     try {
+      // The endpoint is user-editable in settings; trim accidental whitespace
+      // and a trailing '#' (empty URI fragment), both of which Volcengine
+      // rejects with HTTP 400 on the upgrade handshake.
+      var ep = endpoint.trim();
+      while (ep.endsWith('#') || ep.endsWith('/')) {
+        ep = ep.substring(0, ep.length - 1);
+      }
+      debugPrint('[Volc] connect resource=$resourceId ep_raw=${endpoint.length}chars ep_clean=$ep');
       _channel = IOWebSocketChannel.connect(
-        Uri.parse(endpoint),
+        Uri.parse(ep),
         headers: {
           'X-Api-App-Key': appId,
           'X-Api-Access-Key': accessKey,

@@ -74,8 +74,6 @@ class VoiceInputApp extends StatelessWidget {
 class ImeApp extends StatelessWidget {
   const ImeApp({super.key});
 
-  static const double panelHeight = 200;
-
   @override
   Widget build(BuildContext context) {
     debugPrint('[ImeApp] build');
@@ -94,26 +92,18 @@ class ImeApp extends StatelessWidget {
         theme: ThemeData(
           useMaterial3: true,
           colorScheme: lightScheme,
-          scaffoldBackgroundColor: Colors.transparent,
+          scaffoldBackgroundColor: lightScheme.surface,
         ),
         darkTheme: ThemeData(
           useMaterial3: true,
           colorScheme: darkScheme,
-          scaffoldBackgroundColor: Colors.transparent,
+          scaffoldBackgroundColor: darkScheme.surface,
         ),
-        home: Scaffold(
-          backgroundColor: Colors.transparent,
-          body: Align(
-            alignment: Alignment.bottomCenter,
-            child: SizedBox(
-              height: panelHeight,
-              width: double.infinity,
-              child: Material(
-                color: Theme.of(context).colorScheme.surface,
-                child: const ImeKeyboardView(),
-              ),
-            ),
-          ),
+        // Standard bottom keyboard: the native IME service already sizes the
+        // input view to a fixed height and docks it at the bottom, so here we
+        // just fill that area with an opaque keyboard panel.
+        home: const Scaffold(
+          body: ImeKeyboardView(),
         ),
       ),
     );

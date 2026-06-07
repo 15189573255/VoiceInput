@@ -19,6 +19,7 @@ import '../settings/settings_page.dart';
 import 'chips_row.dart';
 
 const _kPrefSuffix = 'pref_suffix';
+const _kPrefNewline = 'pref_newline';
 const _kPrefPolish = 'pref_polish';
 const _kPrefManualHost = 'pref_manual_host';
 const _kPrefManualPort = 'pref_manual_port';
@@ -59,11 +60,22 @@ class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
   DiscoveredService? _activeDevice;
   WsState _wsState = WsState.disconnected;
   bool _listening = false;
+  // Mic trigger style (tap-to-toggle vs hold-to-talk), mirrored from the
+  // shared speech settings so the main page and the IME stay in sync.
+  MicTriggerMode _micMode = MicTriggerMode.tap;
+  // True while the finger is down in hold mode. Guards the async-start race:
+  // if the user releases before _startListening finishes arming, we stop the
+  // engine the moment it comes up instead of leaving it stuck on.
+  bool _micHeld = false;
   // Snapshot of the buffer at the moment the current ASR session started.
   // New partial/final text is appended to this prefix so consecutive
   // recordings accumulate instead of overwriting each other.
   String _sessionPrefix = '';
   String _suffix = 'none';
+  // Newline replacement applied to the buffer on send. Stored as a token:
+  //   keep / space / none / period / comma / custom:<literal>
+  // Default 'keep' preserves prior behaviour (LF flows through as Enter).
+  String _newline = 'keep';
   PolishMode _polish = PolishMode.raw;
   bool _polishing = false;
   String? _statusLine;
@@ -91,6 +103,7 @@ class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
     final p = await SharedPreferences.getInstance();
     setState(() {
       _suffix = p.getString(_kPrefSuffix) ?? 'none';
+      _newline = p.getString(_kPrefNewline) ?? 'keep';
       _polish = PolishModeX.fromWire(p.getString(_kPrefPolish));
       _manualHostCtrl.text = p.getString(_kPrefManualHost) ?? '';
       _manualPortCtrl.text = (p.getInt(_kPrefManualPort) ?? 53118).toString();
@@ -105,10 +118,13 @@ class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
 
     await _speechStore.load();
     _speech = _speechStore.current.buildProvider(hotwords: _hotwords);
+    setState(() => _micMode = _speechStore.current.micMode);
     // Rebuild the speech provider whenever settings change (engine swap, key
-    // edit) so the next mic tap uses the new config without a restart.
+    // edit) so the next mic tap uses the new config without a restart. Also
+    // pick up a mic-mode change (tap ↔ hold) live.
     _speechStore.changes.listen((s) {
       _speech = s.buildProvider(hotwords: _hotwords);
+      if (mounted) setState(() => _micMode = s.micMode);
     });
 
     // TextEditingController doesn't trigger parent rebuilds when its text
@@ -278,6 +294,11 @@ class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
       setState(() => _statusLine = tr('mic.errPermission'));
       return;
     }
+    // Tear down the prior provider before swapping in a new one. speech_to_text
+    // shares one plugin channel across all SpeechToText instances, so leaving
+    // the old provider in memory leaks its callbacks: they keep responding to
+    // engine events for the new sub-session and corrupt counters / state.
+    await _speech?.cancel();
     // Rebuild on each tap so the latest dictionary always flows in as hotwords.
     final speech = _speech = _speechStore.current.buildProvider(hotwords: _hotwords);
     final ok = await speech.initialize();
@@ -345,6 +366,11 @@ class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
       debugPrint('[ASR] stream done');
       setState(() => _listening = false);
     });
+    // Hold mode: if the finger already lifted during the async arming above,
+    // stop now so a quick press-and-release doesn't leave the mic running.
+    if (_micMode == MicTriggerMode.hold && !_micHeld) {
+      _stopListening();
+    }
   }
 
   // Append a new ASR segment to the buffer prefix. Inserts a single ASCII
@@ -402,10 +428,42 @@ class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
     setState(() => _listening = false);
   }
 
+  /// Hard-stop any in-flight recording: cancel the subscription + provider so
+  /// no late partial/final can fire after we've cleared the buffer, and reset
+  /// the session prefix so a stale final can't re-populate a just-sent buffer.
+  /// Called on Send — otherwise the engine keeps listening after dispatch.
+  void _abortListening() {
+    _safetyTimer?.cancel();
+    _speechSub?.cancel();
+    _speechSub = null;
+    _speech?.cancel(); // fire-and-forget; next start rebuilds the provider
+    _sessionPrefix = '';
+    if (_listening) setState(() => _listening = false);
+  }
+
   Future<void> _setSuffix(String v) async {
     setState(() => _suffix = v);
     final p = await SharedPreferences.getInstance();
     await p.setString(_kPrefSuffix, v);
+  }
+
+  Future<void> _setNewline(String v) async {
+    setState(() => _newline = v);
+    final p = await SharedPreferences.getInstance();
+    await p.setString(_kPrefNewline, v);
+  }
+
+  /// Resolve the newline token to the literal string that should replace
+  /// each '\n' (and '\r\n') in the outgoing buffer. Returns null for 'keep'
+  /// so callers can short-circuit and leave the text untouched.
+  String? _newlineReplacement() {
+    if (_newline == 'keep') return null;
+    if (_newline == 'space') return ' ';
+    if (_newline == 'none') return '';
+    if (_newline == 'period') return '。';
+    if (_newline == 'comma') return '，';
+    if (_newline.startsWith('custom:')) return _newline.substring(7);
+    return null;
   }
 
   Future<void> _setPolish(PolishMode v) async {
@@ -448,8 +506,15 @@ class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
   }
 
   void _sendBuffer() {
-    final text = _bufferCtrl.text;
+    var text = _bufferCtrl.text;
     if (text.isEmpty || _wsState != WsState.authed) return;
+    // Stop any live recording so the mic doesn't keep running after dispatch.
+    _abortListening();
+    final repl = _newlineReplacement();
+    if (repl != null) {
+      // Collapse CRLF first so '\r\n' doesn't yield two replacements.
+      text = text.replaceAll('\r\n', repl).replaceAll('\n', repl);
+    }
     _ws?.send(Envelope(type: MsgType.textInput, data: {
       'text': text,
       'suffix': _suffix == 'none' ? '' : _suffix,
@@ -585,10 +650,12 @@ class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
                     focusNode: _bufferFocus,
                     statusLine: _statusLine,
                     suffix: _suffix,
+                    newline: _newline,
                     polish: _polish,
                     polishing: _polishing,
                     polishConfigured: _polishStore.current.isConfigured,
                     onSuffixChanged: _setSuffix,
+                    onNewlineChanged: _setNewline,
                     onPolishChanged: _setPolish,
                     onPolish: _runPolish,
                     onSend: _sendBuffer,
@@ -604,13 +671,23 @@ class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
                 _MicButton(
                   listening: _listening,
                   compact: _bufferHasFocus,
-                  onPressed: () {
+                  holdMode: _micMode == MicTriggerMode.hold,
+                  onTap: () {
                     if (_bufferHasFocus) {
                       // Tapping the mic from edit mode means "I want to talk
                       // again" → drop focus / keyboard, then start listening.
                       _bufferFocus.unfocus();
                     }
                     _listening ? _stopListening() : _startListening();
+                  },
+                  onHoldStart: () {
+                    _micHeld = true;
+                    if (_bufferHasFocus) _bufferFocus.unfocus();
+                    if (!_listening) _startListening();
+                  },
+                  onHoldEnd: () {
+                    _micHeld = false;
+                    if (_listening) _stopListening();
                   },
                 ),
               ],
@@ -911,10 +988,12 @@ class _BufferCard extends StatelessWidget {
   final FocusNode focusNode;
   final String? statusLine;
   final String suffix;
+  final String newline;
   final PolishMode polish;
   final bool polishing;
   final bool polishConfigured;
   final ValueChanged<String> onSuffixChanged;
+  final ValueChanged<String> onNewlineChanged;
   final ValueChanged<PolishMode> onPolishChanged;
   final VoidCallback onPolish;
   final VoidCallback onSend;
@@ -927,10 +1006,12 @@ class _BufferCard extends StatelessWidget {
     required this.focusNode,
     required this.statusLine,
     required this.suffix,
+    required this.newline,
     required this.polish,
     required this.polishing,
     required this.polishConfigured,
     required this.onSuffixChanged,
+    required this.onNewlineChanged,
     required this.onPolishChanged,
     required this.onPolish,
     required this.onSend,
@@ -982,6 +1063,8 @@ class _BufferCard extends StatelessWidget {
             children: [
               _PolishMenu(value: polish, onChanged: onPolishChanged),
               const Spacer(),
+              _NewlineMenu(value: newline, onChanged: onNewlineChanged),
+              const SizedBox(width: 8),
               _SuffixMenu(value: suffix, onChanged: onSuffixChanged),
             ],
           ),
@@ -1031,42 +1114,67 @@ class _BufferCard extends StatelessWidget {
 class _MicButton extends StatelessWidget {
   final bool listening;
   final bool compact;
-  final VoidCallback onPressed;
-  const _MicButton({required this.listening, required this.onPressed, this.compact = false});
+  final bool holdMode;
+  final VoidCallback onTap;
+  final VoidCallback onHoldStart;
+  final VoidCallback onHoldEnd;
+  const _MicButton({
+    required this.listening,
+    required this.onTap,
+    required this.onHoldStart,
+    required this.onHoldEnd,
+    this.holdMode = false,
+    this.compact = false,
+  });
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return GestureDetector(
-      onTap: onPressed,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        height: compact ? 44 : 88,
-        decoration: BoxDecoration(
-          color: listening ? cs.primary : cs.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(compact ? 12 : 20),
-          border: Border.all(color: cs.outlineVariant),
-        ),
-        alignment: Alignment.center,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(listening ? Icons.stop_rounded : Icons.mic_rounded,
-                color: listening ? cs.onPrimary : cs.onSurface,
-                size: compact ? 20 : 28),
-            const SizedBox(width: 10),
-            Text(
-              listening ? tr('mic.tapToStop') : tr('mic.tapToDictate'),
-              style: TextStyle(
-                color: listening ? cs.onPrimary : cs.onSurface,
-                fontSize: compact ? 13 : 15,
-                fontWeight: FontWeight.w500,
-              ),
+    final label = holdMode
+        ? (listening ? tr('mic.holdToStop') : tr('mic.holdToDictate'))
+        : (listening ? tr('mic.tapToStop') : tr('mic.tapToDictate'));
+    // In hold mode the active icon stays a mic (you're holding to record);
+    // only tap mode flips to a stop glyph since you tap again to end.
+    final icon = (listening && !holdMode) ? Icons.stop_rounded : Icons.mic_rounded;
+    final container = AnimatedContainer(
+      duration: const Duration(milliseconds: 160),
+      height: compact ? 44 : 88,
+      decoration: BoxDecoration(
+        color: listening ? cs.primary : cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(compact ? 12 : 20),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      alignment: Alignment.center,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon,
+              color: listening ? cs.onPrimary : cs.onSurface,
+              size: compact ? 20 : 28),
+          const SizedBox(width: 10),
+          Text(
+            label,
+            style: TextStyle(
+              color: listening ? cs.onPrimary : cs.onSurface,
+              fontSize: compact ? 13 : 15,
+              fontWeight: FontWeight.w500,
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
+    if (holdMode) {
+      // Listener (not GestureDetector.onLongPress) so recording starts the
+      // instant the finger lands — no 500 ms long-press delay — and stops on
+      // release or cancel (finger slides off / system steals the pointer).
+      return Listener(
+        onPointerDown: (_) => onHoldStart(),
+        onPointerUp: (_) => onHoldEnd(),
+        onPointerCancel: (_) => onHoldEnd(),
+        child: container,
+      );
+    }
+    return GestureDetector(onTap: onTap, child: container);
   }
 }
 
@@ -1105,6 +1213,90 @@ class _PolishMenu extends StatelessWidget {
           Icon(Icons.auto_fix_high_outlined, size: 14, color: cs.onSurfaceVariant),
           const SizedBox(width: 4),
           Text(_label(value), style: TextStyle(fontSize: 13, color: cs.onSurface)),
+          Icon(Icons.arrow_drop_down, size: 18, color: cs.onSurfaceVariant),
+        ],
+      ),
+    );
+  }
+}
+
+/// Picker for "what should the LF characters inside Buffer turn into when the
+/// user hits Send?" — independent from Suffix (which appends *after* the text).
+/// 'custom:<s>' is the open-ended option; the user is prompted for <s> via an
+/// AlertDialog when they tap the "Custom…" item.
+class _NewlineMenu extends StatelessWidget {
+  final String value;
+  final ValueChanged<String> onChanged;
+  const _NewlineMenu({required this.value, required this.onChanged});
+
+  static const _presets = ['keep', 'space', 'none', 'period', 'comma'];
+
+  String _shortLabel(String v) {
+    if (v == 'keep')   return tr('nl.keep');
+    if (v == 'space')  return tr('nl.space');
+    if (v == 'none')   return tr('nl.none');
+    if (v == 'period') return tr('nl.period');
+    if (v == 'comma')  return tr('nl.comma');
+    if (v.startsWith('custom:')) {
+      final lit = v.substring(7);
+      // Show the literal so the user can tell at a glance what they picked.
+      return '↵→"${lit.isEmpty ? ' ' : lit}"';
+    }
+    return v;
+  }
+
+  Future<void> _askCustom(BuildContext context) async {
+    // Pre-fill with the existing custom literal so editing is easy.
+    final ctrl = TextEditingController(
+      text: value.startsWith('custom:') ? value.substring(7) : '',
+    );
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(tr('nl.customTitle')),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: InputDecoration(labelText: tr('nl.customLabel')),
+          onSubmitted: (_) => Navigator.of(ctx).pop(ctrl.text),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: Text(tr('common.cancel'))),
+          FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(ctrl.text),
+              child: Text(tr('common.confirm'))),
+        ],
+      ),
+    );
+    if (result != null) onChanged('custom:$result');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return PopupMenuButton<String>(
+      tooltip: '',
+      onSelected: (v) {
+        if (v == '__custom__') {
+          _askCustom(context);
+        } else {
+          onChanged(v);
+        }
+      },
+      itemBuilder: (_) => [
+        for (final v in _presets)
+          PopupMenuItem(value: v, height: 38, child: Text(_shortLabel(v))),
+        const PopupMenuDivider(),
+        PopupMenuItem(value: '__custom__', height: 38, child: Text(tr('nl.custom'))),
+      ],
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.wrap_text, size: 14, color: cs.onSurfaceVariant),
+          const SizedBox(width: 4),
+          Text(_shortLabel(value), style: TextStyle(fontSize: 13, color: cs.onSurface)),
           Icon(Icons.arrow_drop_down, size: 18, color: cs.onSurfaceVariant),
         ],
       ),

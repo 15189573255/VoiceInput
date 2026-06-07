@@ -36,6 +36,11 @@ class WsClient {
   // unexpected close as a transient blip and retry with backoff. Surrendering
   // here is preferable to silently disconnecting the user mid-dictation.
   bool _wasAuthed = false;
+  // Set when the server tells us another device/instance took over this peer.
+  // We then stand down instead of auto-reconnecting — otherwise two clients
+  // sharing one deviceId ping-pong the session forever (the "paired status
+  // flaps once a second" bug). Cleared on the next user-initiated connect.
+  bool _displaced = false;
   int _reconnectAttempts = 0;
   Timer? _reconnectTimer;
   static const _maxReconnects = 3;
@@ -50,6 +55,8 @@ class WsClient {
   Future<void> connect(String host, int port) async {
     _log('connect host=$host port=$port');
     await disconnect(intentional: true);
+    // A fresh user-initiated connect clears any prior "displaced" standdown.
+    _displaced = false;
     _setState(WsState.connecting);
     _currentHost = host;
     _currentPort = port;
@@ -134,6 +141,16 @@ class WsClient {
       final d = env.data ?? const {};
       final code = d['code']?.toString() ?? '';
       _log('server error: $code / ${d['message']}');
+      if (code == 'displaced') {
+        // Another device/instance grabbed this desktop. Reconnecting would
+        // kick *them* off and restart a mutual-displacement loop that shows
+        // up as the pairing status flapping once a second. Stand down.
+        _displaced = true;
+        _wasAuthed = false;
+        _reconnectTimer?.cancel();
+        _reconnectTimer = null;
+        _errorCtrl.add(PairingError('displaced', d['message']?.toString() ?? 'Taken over by another device'));
+      }
       return;
     }
 
@@ -188,7 +205,7 @@ class WsClient {
     //   - server's "latest-wins" temporarily kicked us;
     //   - Wi-Fi roamed / momentarily dropped;
     //   - desktop process briefly restarted.
-    if (_wasAuthed && host != null && port != null && _reconnectAttempts < _maxReconnects) {
+    if (_wasAuthed && !_displaced && host != null && port != null && _reconnectAttempts < _maxReconnects) {
       _reconnectAttempts++;
       final delayMs = 600 * _reconnectAttempts;
       _log('reconnect scheduled #$_reconnectAttempts in ${delayMs}ms');

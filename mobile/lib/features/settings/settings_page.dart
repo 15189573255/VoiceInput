@@ -36,6 +36,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   SpeechSettings _cloneSpeech(SpeechSettings s) => SpeechSettings(
         engine: s.engine,
+        micMode: s.micMode,
         whisperBaseUrl: s.whisperBaseUrl,
         whisperApiKey: s.whisperApiKey,
         whisperModel: s.whisperModel,
@@ -141,6 +142,20 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 16),
           _Section(
+            title: tr('set.micMode'),
+            subtitle: tr('set.micModeSub'),
+            child: SegmentedButton<MicTriggerMode>(
+              segments: [
+                ButtonSegment(value: MicTriggerMode.tap, label: Text(tr('set.micTap')), icon: const Icon(Icons.touch_app_outlined, size: 16)),
+                ButtonSegment(value: MicTriggerMode.hold, label: Text(tr('set.micHold')), icon: const Icon(Icons.mic_none_outlined, size: 16)),
+              ],
+              selected: {_speechDraft.micMode},
+              onSelectionChanged: (s) => setState(() => _speechDraft.micMode = s.first),
+              style: ButtonStyle(visualDensity: VisualDensity.compact),
+            ),
+          ),
+          const SizedBox(height: 16),
+          _Section(
             title: tr('set.speechSection'),
             subtitle: tr('set.speechSub'),
             child: Column(
@@ -230,8 +245,10 @@ class _SettingsPageState extends State<SettingsPage> {
                     isExpanded: true,
                     decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true, labelText: 'Resource ID'),
                     items: const [
-                      DropdownMenuItem(value: 'volc.bigasr.sauc.duration', child: Text('volc.bigasr.sauc.duration (small / fast)')),
-                      DropdownMenuItem(value: 'volc.bigasr.sauc.bigmodel', child: Text('volc.bigasr.sauc.bigmodel (large)')),
+                      DropdownMenuItem(value: 'volc.bigasr.sauc.duration', child: Text('volc.bigasr.sauc.duration  (Doubao 1.0 · 小时版)')),
+                      DropdownMenuItem(value: 'volc.bigasr.sauc.concurrent', child: Text('volc.bigasr.sauc.concurrent  (Doubao 1.0 · 并发版)')),
+                      DropdownMenuItem(value: 'volc.seedasr.sauc.duration', child: Text('volc.seedasr.sauc.duration  (Doubao 2.0 · 小时版)')),
+                      DropdownMenuItem(value: 'volc.seedasr.sauc.concurrent', child: Text('volc.seedasr.sauc.concurrent  (Doubao 2.0 · 并发版)')),
                     ],
                     onChanged: (v) => setState(() => _speechDraft.vcResourceId = v ?? 'volc.bigasr.sauc.duration'),
                   ),

@@ -1,11 +1,13 @@
 import {useEffect, useState} from 'react';
 import './App.css';
 import {getLocale, setLocale, t, useLocale} from './i18n';
+import {ErrorBoundary} from './ErrorBoundary';
+import {AdbPage} from './pages/AdbPage';
 import {DashboardPage} from './pages/DashboardPage';
 import {DictionaryPage} from './pages/DictionaryPage';
 import {SnippetsPage} from './pages/SnippetsPage';
 
-type Tab = 'dashboard' | 'snippets' | 'dictionary';
+type Tab = 'dashboard' | 'snippets' | 'dictionary' | 'adb';
 type Theme = 'auto' | 'light' | 'dark';
 
 const THEME_KEY = 'voiceinput.theme';
@@ -42,6 +44,8 @@ function App() {
                             onClick={() => setTab('snippets')}>{t('nav.snippets')}</button>
                     <button className={`tab ${tab === 'dictionary' ? 'tab-on' : ''}`}
                             onClick={() => setTab('dictionary')}>{t('nav.dictionary')}</button>
+                    <button className={`tab ${tab === 'adb' ? 'tab-on' : ''}`}
+                            onClick={() => setTab('adb')}>{t('nav.adb')}</button>
                 </nav>
                 <div className="topbar-spacer"/>
                 <button
@@ -61,9 +65,12 @@ function App() {
                     {theme === 'light' ? <IconSun/> : theme === 'dark' ? <IconMoon/> : <IconAuto/>}
                 </button>
             </header>
-            {tab === 'dashboard' && <DashboardPage/>}
-            {tab === 'snippets' && <SnippetsPage/>}
-            {tab === 'dictionary' && <DictionaryPage/>}
+            <ErrorBoundary key={tab}>
+                {tab === 'dashboard' && <DashboardPage/>}
+                {tab === 'snippets' && <SnippetsPage/>}
+                {tab === 'dictionary' && <DictionaryPage/>}
+                {tab === 'adb' && <AdbPage/>}
+            </ErrorBoundary>
         </div>
     );
 }

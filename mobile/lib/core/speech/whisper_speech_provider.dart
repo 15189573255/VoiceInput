@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 
 import 'speech_provider.dart';
@@ -46,7 +47,11 @@ class WhisperSpeechProvider implements SpeechProvider {
       _lastError = 'Whisper not configured (set base URL + API key in Settings)';
       return false;
     }
-    if (!await _recorder.hasPermission()) {
+    // See VolcengineSpeechProvider.initialize: _recorder.hasPermission() returns
+    // false in the IME (no Activity attached to the record plugin), so use
+    // permission_handler, which checks the application context and works in both
+    // the main app and the IME.
+    if (!await Permission.microphone.isGranted) {
       _lastError = 'Microphone permission denied';
       return false;
     }

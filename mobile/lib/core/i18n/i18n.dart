@@ -64,6 +64,7 @@ const Map<String, Map<AppLocale, String>> _dict = {
   // Common verbs
   'common.save':          {AppLocale.zh: '保存',                AppLocale.en: 'Save'},
   'common.cancel':        {AppLocale.zh: '取消',                AppLocale.en: 'Cancel'},
+  'common.confirm':       {AppLocale.zh: '确定',                AppLocale.en: 'OK'},
   'common.delete':        {AppLocale.zh: '删除',                AppLocale.en: 'Delete'},
   'common.rescan':        {AppLocale.zh: '重新扫描',            AppLocale.en: 'Rescan'},
   'common.settings':      {AppLocale.zh: '设置',                AppLocale.en: 'Settings'},
@@ -110,6 +111,8 @@ const Map<String, Map<AppLocale, String>> _dict = {
   // Mic bar
   'mic.tapToDictate':     {AppLocale.zh: '点击开始录音',        AppLocale.en: 'Tap to dictate'},
   'mic.tapToStop':        {AppLocale.zh: '点击停止',            AppLocale.en: 'Tap to stop'},
+  'mic.holdToDictate':    {AppLocale.zh: '按住说话',            AppLocale.en: 'Hold to talk'},
+  'mic.holdToStop':       {AppLocale.zh: '松开结束',            AppLocale.en: 'Release to stop'},
   'mic.hearing':          {AppLocale.zh: '识别中… 已 {0} 字',   AppLocale.en: 'Hearing… {0}c'},
   'mic.noSpeech':         {AppLocale.zh: '没听到内容',          AppLocale.en: 'No speech'},
   'mic.errPermission':    {AppLocale.zh: '麦克风权限被拒绝',    AppLocale.en: 'Microphone permission denied'},
@@ -117,6 +120,16 @@ const Map<String, Map<AppLocale, String>> _dict = {
 
   // Suffix dropdown
   'suf.none':             {AppLocale.zh: '无后缀',              AppLocale.en: 'No suffix'},
+
+  // Newline replacement dropdown — controls what Buffer's '\n' becomes on send
+  'nl.keep':              {AppLocale.zh: '保留换行',            AppLocale.en: 'Keep newline'},
+  'nl.space':             {AppLocale.zh: '换行→空格',           AppLocale.en: 'Newline→Space'},
+  'nl.none':              {AppLocale.zh: '换行→删除',           AppLocale.en: 'Newline→Remove'},
+  'nl.period':            {AppLocale.zh: '换行→「。」',         AppLocale.en: 'Newline→「。」'},
+  'nl.comma':             {AppLocale.zh: '换行→「，」',         AppLocale.en: 'Newline→「，」'},
+  'nl.custom':            {AppLocale.zh: '自定义…',             AppLocale.en: 'Custom…'},
+  'nl.customLabel':       {AppLocale.zh: '换行符替换为',        AppLocale.en: 'Replace newline with'},
+  'nl.customTitle':       {AppLocale.zh: '自定义换行替换',      AppLocale.en: 'Custom newline replacement'},
 
   // Polish modes
   'polish.raw':           {AppLocale.zh: '原文',                AppLocale.en: 'Raw'},
@@ -136,6 +149,11 @@ const Map<String, Map<AppLocale, String>> _dict = {
   'set.speechSub':        {AppLocale.zh: '决定语音识别在哪里完成。System 使用系统/厂商引擎（多数设备可离线），Whisper 把音频发到任意 OpenAI 兼容的 /v1/audio/transcriptions 端点。',
                            AppLocale.en: 'Where transcription happens. System uses the OEM speech recognizer (offline-capable on most devices). Whisper sends audio to any OpenAI-compatible /v1/audio/transcriptions endpoint.'},
   'set.engine':           {AppLocale.zh: '引擎',                AppLocale.en: 'Engine'},
+  'set.micMode':          {AppLocale.zh: '录音方式',            AppLocale.en: 'Recording trigger'},
+  'set.micModeSub':       {AppLocale.zh: '点击：点一下开始、再点一下停止。按住：按住说话、松手结束。',
+                           AppLocale.en: 'Tap: tap to start, tap again to stop. Hold: press and hold to talk, release to stop.'},
+  'set.micTap':           {AppLocale.zh: '点击',                AppLocale.en: 'Tap'},
+  'set.micHold':          {AppLocale.zh: '按住',                AppLocale.en: 'Hold'},
   'set.engineSystem':     {AppLocale.zh: '系统 (离线 / 厂商)',  AppLocale.en: 'System (offline / OEM)'},
   'set.engineWhisper':    {AppLocale.zh: 'Whisper 兼容（批式）', AppLocale.en: 'Whisper compatible (batch)'},
   'set.engineVolcengine': {AppLocale.zh: '火山引擎流式',        AppLocale.en: 'Volcengine streaming'},
@@ -171,4 +189,20 @@ const Map<String, Map<AppLocale, String>> _dict = {
 
   'set.vcHint':           {AppLocale.zh: '词典中的词条会自动作为 ASR 上下文 hotwords 注入，确保专有名词不被误识。',
                            AppLocale.en: 'Hotwords from your Dictionary tab are auto-injected into the ASR config to preserve domain terms.'},
+
+  // IME keyboard panel (shown when VoiceInput is the active system keyboard).
+  // Most labels reuse the mic.* / buf.* keys above; these are IME-only strings.
+  'ime.destPhone':        {AppLocale.zh: '手机',                AppLocale.en: 'Phone'},
+  'ime.destPc':           {AppLocale.zh: '电脑',                AppLocale.en: 'PC'},
+  'ime.switchKeyboard':   {AppLocale.zh: '切换输入法',          AppLocale.en: 'Switch keyboard'},
+  'ime.bufferHint':       {AppLocale.zh: '缓冲区',              AppLocale.en: 'Buffer'},
+  'ime.listening':        {AppLocale.zh: '识别中…',             AppLocale.en: 'Listening…'},
+  'ime.asrError':         {AppLocale.zh: '识别错误：{0}',       AppLocale.en: 'ASR error: {0}'},
+  'ime.inserted':         {AppLocale.zh: '已插入',              AppLocale.en: 'Inserted'},
+  'ime.sentToPc':         {AppLocale.zh: '已发送到电脑',        AppLocale.en: 'Sent to PC'},
+  'ime.pairFirst':        {AppLocale.zh: '请先在 VoiceInput 应用内配对',
+                           AppLocale.en: 'Pair in the VoiceInput app first'},
+  'ime.connectFailed':    {AppLocale.zh: '连接失败',            AppLocale.en: 'Connect failed'},
+  'ime.micGrantHint':     {AppLocale.zh: '请先在 VoiceInput 应用内授予麦克风权限',
+                           AppLocale.en: 'Grant microphone permission in the VoiceInput app first'},
 };

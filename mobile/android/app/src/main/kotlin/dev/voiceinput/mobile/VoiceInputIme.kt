@@ -1,8 +1,6 @@
 package dev.voiceinput.mobile
 
 import android.content.Context
-import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
 import android.inputmethodservice.InputMethodService
 import android.util.Log
 import android.util.TypedValue
@@ -53,10 +51,6 @@ class VoiceInputIme : InputMethodService() {
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "onCreate / pid=${android.os.Process.myPid()}")
-        // Strip the default IME panel background so the area above our 260dp
-        // keyboard is visually transparent (combined with onComputeInsets, the
-        // host app shows through and gets touch events).
-        window?.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         engine = obtainEngine(this)
         Log.i(TAG, "engine obtained: $engine running=${engine?.dartExecutor?.isExecutingDart}")
         channel = MethodChannel(engine!!.dartExecutor.binaryMessenger, CHANNEL).apply {
@@ -109,31 +103,12 @@ class VoiceInputIme : InputMethodService() {
     override fun onEvaluateFullscreenMode(): Boolean = false
     override fun onEvaluateInputViewShown(): Boolean = true
 
-    // Tell the system "only the bottom 260dp of my IME window is the actual
-    // keyboard; above that is overlay that should pass touches through and
-    // show the host app underneath". This is the same mechanism Sogou/Gboard
-    // use to keep the host app visible and resized above the keyboard.
-    override fun onComputeInsets(outInsets: InputMethodService.Insets?) {
-        super.onComputeInsets(outInsets)
-        if (outInsets == null) return
-        val panelPx = TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_DIP, 200f, resources.displayMetrics,
-        ).toInt()
-        val windowH = window?.window?.decorView?.height ?: 0
-        val topInset = (windowH - panelPx).coerceAtLeast(0)
-        outInsets.contentTopInsets = topInset
-        outInsets.visibleTopInsets = topInset
-        // FRAME makes the entire IME window touchable. Previously we used
-        // CONTENT (only below contentTopInsets), but if windowH ever lags
-        // behind layout (e.g. fresh activation), the touchable region ends
-        // up either too small or above our content, which manifests as
-        // "I can see the keyboard but taps do nothing." FRAME is safer; the
-        // host app already shows behind the transparent area via the
-        // visible/content insets, and the rare cost is we capture the
-        // upper-region taps even though we render nothing there.
-        outInsets.touchableInsets = InputMethodService.Insets.TOUCHABLE_INSETS_FRAME
-        Log.d(TAG, "onComputeInsets windowH=$windowH panel=$panelPx topInset=$topInset")
-    }
+    // Standard bottom-docked keyboard: we deliberately do NOT override
+    // onComputeInsets. The default InputMethodService behaviour places our
+    // fixed-height input view at the bottom, resizes the host app to sit above
+    // it, and makes exactly the input-view rect touchable. The old custom
+    // insets (a transparent full-screen overlay) were what caused first
+    // "can't tap anything" and then "keyboard covers the whole screen" on MIUI.
 
     override fun onCreateInputView(): View {
         Log.i(TAG, "onCreateInputView")
@@ -148,11 +123,19 @@ class VoiceInputIme : InputMethodService() {
                 height,
             )
         }
-        val textureView = FlutterTextureView(this).apply { isOpaque = false }
+        // Opaque texture view — a standard keyboard paints a solid panel. The
+        // old isOpaque=false was for the (removed) see-through overlay and
+        // rendered as a black/grey full-screen block on some OEMs.
+        val textureView = FlutterTextureView(this)
         val view = FlutterView(this, textureView)
+        // Fix the FlutterView to the panel height. InputMethodService.setInputView
+        // re-adds our container with MATCH_PARENT x WRAP_CONTENT, so a
+        // MATCH_PARENT-height child stretches to fill the WHOLE screen — that's
+        // the "keyboard is full-screen / pinned to the top" bug. A fixed height
+        // makes the input view wrap to exactly the keyboard panel.
         view.layoutParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT,
+            height,
         )
         flutterView = view
         view.attachToFlutterEngine(engine!!)
@@ -184,12 +167,22 @@ class VoiceInputIme : InputMethodService() {
 
     override fun onWindowShown() {
         super.onWindowShown()
+        // Drive the embedded engine's lifecycle to RESUMED. A FlutterActivity
+        // does this automatically; a hand-rolled FlutterView host must do it
+        // itself. Without it the engine's AppLifecycleState stays non-resumed,
+        // so SchedulerBinding.framesEnabled is false: the warm-up frame paints
+        // (keyboard is visible) but setState() after a tap never schedules a new
+        // frame — every key looks dead even though onTap fired. THIS is why our
+        // Flutter keyboard couldn't be tapped while native keyboards (Sogou/
+        // Baidu) work — they don't depend on Flutter's frame scheduling.
+        engine?.lifecycleChannel?.appIsResumed()
         val w = window?.window
         Log.i(TAG, "onWindowShown decorH=${w?.decorView?.height} attrs=${w?.attributes}")
     }
 
     override fun onWindowHidden() {
         super.onWindowHidden()
+        engine?.lifecycleChannel?.appIsInactive()
         Log.i(TAG, "onWindowHidden")
     }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"desktop/internal/adbwireless"
 	"desktop/internal/focus"
 	"desktop/internal/inject"
 	"desktop/internal/protocol"
@@ -45,10 +46,21 @@ type App struct {
 	focusMu      sync.Mutex
 	lastFocus    string // last process name pushed
 	lastFocusAt  time.Time
+
+	// ADB wireless debugging helpers. The discoverer is started on demand
+	// (StartAdbDiscovery) so we don't burn an extra mDNS browser when the
+	// user never opens the panel.
+	adbCLI       *adbwireless.CLI
+	adbMu        sync.Mutex
+	adbDiscover  *adbwireless.Discoverer
 }
 
 func NewApp() *App {
-	return &App{injector: inject.New(), focusDet: focus.New()}
+	return &App{
+		injector: inject.New(),
+		focusDet: focus.New(),
+		adbCLI:   adbwireless.NewCLI(""),
+	}
 }
 
 type wailsBus struct{ ctx context.Context }
@@ -112,6 +124,7 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.focusDet != nil {
 		_ = a.focusDet.Close()
 	}
+	a.StopAdbDiscovery()
 }
 
 // onClientAuthed runs whenever a session transitions to authed. Push the full
@@ -382,6 +395,78 @@ func (a *App) ReplaceDictionary(terms []string) error {
 func mustMarshalJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// --- ADB wireless debugging surface (called from the React UI) -------------
+
+// StartAdbDiscovery begins (or re-uses) an mDNS browser for the two adb
+// service types. Endpoint changes are pushed to the UI via the "adb:endpoints"
+// event so the React layer can be event-driven without polling.
+func (a *App) StartAdbDiscovery() error {
+	a.adbMu.Lock()
+	defer a.adbMu.Unlock()
+	if a.adbDiscover != nil {
+		// Re-emit the current snapshot so a re-mounted UI sees state instantly.
+		runtime.EventsEmit(a.ctx, "adb:endpoints", a.adbDiscover.Snapshot())
+		return nil
+	}
+	d := adbwireless.NewDiscoverer(func(eps []adbwireless.Endpoint) {
+		runtime.EventsEmit(a.ctx, "adb:endpoints", eps)
+	})
+	if err := d.Start(); err != nil {
+		return err
+	}
+	a.adbDiscover = d
+	return nil
+}
+
+// StopAdbDiscovery tears down the mDNS browser. Safe to call when not started.
+func (a *App) StopAdbDiscovery() {
+	a.adbMu.Lock()
+	d := a.adbDiscover
+	a.adbDiscover = nil
+	a.adbMu.Unlock()
+	if d != nil {
+		d.Stop()
+	}
+}
+
+// GetAdbEndpoints returns the latest discovery snapshot in one shot, useful
+// for a freshly-mounted panel that doesn't want to wait on an event tick.
+func (a *App) GetAdbEndpoints() []adbwireless.Endpoint {
+	a.adbMu.Lock()
+	defer a.adbMu.Unlock()
+	if a.adbDiscover == nil {
+		return []adbwireless.Endpoint{}
+	}
+	return a.adbDiscover.Snapshot()
+}
+
+// AdbVersion reports the local adb binary version (mostly: "is it installed").
+func (a *App) AdbVersion() (string, error) {
+	return a.adbCLI.Version(a.ctx)
+}
+
+// AdbPair runs `adb pair <addr> <code>`. Returns the daemon output so the UI
+// can echo "Successfully paired..." back to the user verbatim.
+func (a *App) AdbPair(addr, code string) (adbwireless.PairResult, error) {
+	return a.adbCLI.Pair(a.ctx, addr, code)
+}
+
+// AdbConnect runs `adb connect <addr>`. After success the UI typically wants
+// to call AdbDevices to confirm the device showed up.
+func (a *App) AdbConnect(addr string) (string, error) {
+	return a.adbCLI.Connect(a.ctx, addr)
+}
+
+// AdbDisconnect drops one device (or all when addr=="").
+func (a *App) AdbDisconnect(addr string) (string, error) {
+	return a.adbCLI.Disconnect(a.ctx, addr)
+}
+
+// AdbDevices returns `adb devices -l` parsed into structured rows.
+func (a *App) AdbDevices() ([]adbwireless.Device, error) {
+	return a.adbCLI.Devices(a.ctx)
 }
 
 func peersPath() string {

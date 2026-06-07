@@ -1,13 +1,13 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../../core/i18n/i18n.dart';
 import '../../core/ime/ime_bridge.dart';
 import '../../core/protocol/messages.dart';
 import '../../core/speech/speech_provider.dart';
-import '../../core/speech/system_speech_provider.dart';
+import '../../core/speech/speech_settings.dart';
 import '../../core/transport/token_store.dart';
 import '../../core/transport/ws_client.dart';
 
@@ -31,7 +31,11 @@ enum _Dest { phone, pc }
 
 class _ImeKeyboardViewState extends State<ImeKeyboardView> {
   final ImeBridge _ime = ImeBridge();
-  final SpeechProvider _speech = SystemSpeechProvider();
+  final SpeechSettingsStore _speechStore = SpeechSettingsStore();
+  // Built from the user's saved settings (same SharedPreferences blob the main
+  // app writes), so picking "Volcengine streaming" in Settings gives the IME
+  // real-time partial results too. Rebuilt on every mic tap and on changes.
+  SpeechProvider? _speech;
   WsClient? _ws;
   TokenStore? _tokens;
 
@@ -43,6 +47,10 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
 
   _Dest _dest = _Dest.phone;
   bool _listening = false;
+  // Mic trigger style, mirrored from the shared speech settings (tap vs hold).
+  MicTriggerMode _micMode = MicTriggerMode.tap;
+  // True while held in hold mode — guards the async-start race (see main page).
+  bool _micHeld = false;
   // Buffer contents at the moment the current ASR session started; the new
   // utterance is appended to this so successive recordings accumulate.
   String _sessionPrefix = '';
@@ -76,11 +84,24 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
     });
 
     _bufferCtrl.addListener(() => setState(() {}));
+
+    // Load the shared speech settings and build the configured engine. The main
+    // app and the IME read the same blob, so whatever engine the user picked
+    // (e.g. Volcengine streaming) applies to the IME as well.
+    await _speechStore.load();
+    _speech = _speechStore.current.buildProvider();
+    if (mounted) setState(() => _micMode = _speechStore.current.micMode);
+    _speechStore.changes.listen((s) {
+      _speech = s.buildProvider();
+      if (mounted) setState(() => _micMode = s.micMode);
+    });
   }
 
   @override
   void dispose() {
     _speechSub?.cancel();
+    _speech?.cancel();
+    _speechStore.dispose();
     _wsStateSub?.cancel();
     _imeSub?.cancel();
     _ws?.dispose();
@@ -94,33 +115,68 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
   Future<void> _toggleListen() async {
     debugPrint('[ImeView] mic tap (currently listening=$_listening)');
     if (_listening) {
-      await _speech.stop();
-      setState(() => _listening = false);
+      await _stopListening();
+    } else {
+      await _startListening();
+    }
+  }
+
+  Future<void> _stopListening() async {
+    if (!_listening) return;
+    await _speech?.stop();
+    setState(() => _listening = false);
+  }
+
+  /// Hard-stop a recording on Send: drop the subscription + provider so a late
+  /// final can't refill the buffer we just cleared, and reset the prefix.
+  void _abortListening() {
+    _speechSub?.cancel();
+    _speechSub = null;
+    _speech?.cancel();
+    _sessionPrefix = '';
+    if (_listening) setState(() => _listening = false);
+  }
+
+  Future<void> _startListening() async {
+    if (_listening) return;
+    // An IME has no host Activity, so we cannot REQUEST a runtime permission
+    // here — permission_handler throws "Unable to detect current Android
+    // Activity" and the whole tap is aborted (that's why the mic never started
+    // even though the tap was received). Only CHECK the status; the user grants
+    // RECORD_AUDIO once inside the main VoiceInput app, which is an Activity and
+    // can show the system dialog. The grant is app-wide, so the IME inherits it.
+    bool granted = false;
+    try {
+      granted = await Permission.microphone.isGranted;
+    } catch (_) {
+      granted = false;
+    }
+    if (!granted) {
+      setState(() => _status = tr('ime.micGrantHint'));
       return;
     }
-    final granted = await Permission.microphone.request();
-    if (!granted.isGranted) {
-      setState(() => _status = 'Microphone denied');
-      return;
-    }
-    final ok = await _speech.initialize();
+    // Rebuild from the latest settings on each tap so an engine/key change in
+    // the main app takes effect here without restarting the keyboard.
+    await _speech?.cancel();
+    final speech = _speech = _speechStore.current.buildProvider();
+    final ok = await speech.initialize();
     if (!ok) {
-      setState(() => _status = _speech.lastError ?? 'Speech engine unavailable');
+      setState(() => _status = speech.lastError ?? tr('mic.errEngine'));
       return;
     }
     setState(() {
       _listening = true;
-      _status = 'Listening…';
+      _status = tr('ime.listening');
     });
     _sessionPrefix = _bufferCtrl.text;
     _speechSub?.cancel();
-    _speechSub = _speech.start().listen((ev) {
+    _speechSub = speech.start().listen((ev) {
       switch (ev.kind) {
         case SpeechEventKind.partial:
           final combined = _joinSegment(_sessionPrefix, ev.text);
           _bufferCtrl.text = combined;
           _bufferCtrl.selection = TextSelection.collapsed(offset: combined.length);
-          setState(() => _status = 'Hearing… ${ev.text.length}c');
+          setState(() => _status = tr('mic.hearing', [ev.text.length]));
           break;
         case SpeechEventKind.finalResult:
           final combined = _joinSegment(_sessionPrefix, ev.text);
@@ -129,25 +185,35 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
           _sessionPrefix = combined;
           setState(() {
             _listening = false;
-            _status = 'Ready';
+            _status = tr('buf.statusReadyToSend');
           });
           break;
         case SpeechEventKind.done:
           setState(() {
             _listening = false;
-            if (_status == null || _status!.startsWith('Hearing')) {
-              _status = _bufferCtrl.text.isEmpty ? 'No speech' : 'Ready';
+            // Match the localized "hearing" prefix (zh「识别中」/ en "Hearing")
+            // so a done arriving mid-recognition still resolves to a final
+            // status instead of being stuck on the partial counter.
+            final hearingPrefix = tr('mic.hearing', [0]).split('…').first;
+            if (_status == null || _status!.startsWith(hearingPrefix)) {
+              _status = _bufferCtrl.text.isEmpty
+                  ? tr('mic.noSpeech')
+                  : tr('buf.statusReadyToSend');
             }
           });
           break;
         case SpeechEventKind.error:
           setState(() {
             _listening = false;
-            _status = 'ASR error: ${ev.errorCode}';
+            _status = tr('ime.asrError', [ev.errorCode ?? '']);
           });
           break;
       }
     });
+    // Hold mode: finger already lifted while arming → stop immediately.
+    if (_micMode == MicTriggerMode.hold && !_micHeld) {
+      _stopListening();
+    }
   }
 
   // See [VoiceKeyboardPage._joinSegment] — keeps consecutive ASR sessions
@@ -183,6 +249,8 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
     final text = _bufferCtrl.text;
     debugPrint('[ImeView] send dest=$_dest len=${text.length}');
     if (text.isEmpty) return;
+    // Stop any live recording so the mic doesn't keep running after dispatch.
+    _abortListening();
     if (_dest == _Dest.phone) {
       await _ime.commitText(text);
     } else {
@@ -193,7 +261,7 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
     }
     setState(() {
       _bufferCtrl.clear();
-      _status = _dest == _Dest.phone ? 'Inserted' : 'Sent to PC';
+      _status = _dest == _Dest.phone ? tr('ime.inserted') : tr('ime.sentToPc');
     });
   }
 
@@ -202,14 +270,14 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
     if (store == null) return;
     final peer = store.lastPeer;
     if (peer == null) {
-      setState(() => _status = 'Pair in VoiceInput app first');
+      setState(() => _status = tr('ime.pairFirst'));
       return;
     }
-    setState(() => _status = 'Connecting…');
+    setState(() => _status = tr('state.connecting'));
     try {
       await _ws!.connect(peer.host, peer.port);
     } catch (_) {
-      setState(() => _status = 'Connect failed');
+      setState(() => _status = tr('ime.connectFailed'));
     }
   }
 
@@ -240,7 +308,13 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
             onSend: _canSend ? _send : null,
           ),
           const SizedBox(height: 6),
-          _MicBar(listening: _listening, onTap: _toggleListen),
+          _MicBar(
+            listening: _listening,
+            holdMode: _micMode == MicTriggerMode.hold,
+            onTap: _toggleListen,
+            onHoldStart: () { _micHeld = true; if (!_listening) _startListening(); },
+            onHoldEnd: () { _micHeld = false; if (_listening) _stopListening(); },
+          ),
         ],
       ),
     );
@@ -273,12 +347,12 @@ class _TopBar extends StatelessWidget {
           segments: [
             ButtonSegment(
               value: _Dest.phone,
-              label: const Text('Phone'),
+              label: Text(tr('ime.destPhone')),
               icon: const Icon(Icons.smartphone, size: 16),
             ),
             ButtonSegment(
               value: _Dest.pc,
-              label: Text(wsConnected ? 'PC' : 'PC·'),
+              label: Text(wsConnected ? tr('ime.destPc') : '${tr('ime.destPc')}·'),
               icon: const Icon(Icons.desktop_windows_outlined, size: 16),
             ),
           ],
@@ -292,13 +366,13 @@ class _TopBar extends StatelessWidget {
         const SizedBox(width: 8),
         Expanded(
           child: Text(
-            status ?? (hostApp != null ? '→ $hostApp' : 'Tap mic to dictate'),
+            status ?? (hostApp != null ? '→ $hostApp' : tr('mic.tapToDictate')),
             style: TextStyle(color: cs.onSurfaceVariant, fontSize: 11),
             overflow: TextOverflow.ellipsis,
           ),
         ),
         IconButton(
-          tooltip: 'Switch keyboard',
+          tooltip: tr('ime.switchKeyboard'),
           icon: const Icon(Icons.keyboard_alt_outlined, size: 20),
           onPressed: onSwitchKeyboard,
           padding: EdgeInsets.zero,
@@ -334,10 +408,10 @@ class _BufferRow extends StatelessWidget {
               maxLines: 3,
               minLines: 1,
               style: const TextStyle(fontSize: 14),
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 isCollapsed: true,
                 border: InputBorder.none,
-                hintText: 'Buffer',
+                hintText: tr('ime.bufferHint'),
               ),
             ),
           ),
@@ -346,12 +420,12 @@ class _BufferRow extends StatelessWidget {
             icon: const Icon(Icons.backspace_outlined, size: 18),
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-            tooltip: 'Clear buffer',
+            tooltip: tr('buf.clearBuf'),
           ),
           FilledButton.icon(
             onPressed: onSend,
             icon: const Icon(Icons.send_rounded, size: 16),
-            label: const Text('Send'),
+            label: Text(tr('buf.send')),
             style: FilledButton.styleFrom(
               visualDensity: VisualDensity.compact,
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -365,40 +439,59 @@ class _BufferRow extends StatelessWidget {
 
 class _MicBar extends StatelessWidget {
   final bool listening;
+  final bool holdMode;
   final VoidCallback onTap;
-  const _MicBar({required this.listening, required this.onTap});
+  final VoidCallback onHoldStart;
+  final VoidCallback onHoldEnd;
+  const _MicBar({
+    required this.listening,
+    required this.onTap,
+    required this.onHoldStart,
+    required this.onHoldEnd,
+    this.holdMode = false,
+  });
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        height: 56,
-        decoration: BoxDecoration(
-          color: listening ? cs.primary : cs.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: cs.outlineVariant),
-        ),
-        alignment: Alignment.center,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(listening ? Icons.stop_rounded : Icons.mic_rounded,
-                color: listening ? cs.onPrimary : cs.onSurface, size: 22),
-            const SizedBox(width: 8),
-            Text(
-              listening ? 'Tap to stop' : 'Tap to dictate',
-              style: TextStyle(
-                color: listening ? cs.onPrimary : cs.onSurface,
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-              ),
+    final label = holdMode
+        ? (listening ? tr('mic.holdToStop') : tr('mic.holdToDictate'))
+        : (listening ? tr('mic.tapToStop') : tr('mic.tapToDictate'));
+    final icon = (listening && !holdMode) ? Icons.stop_rounded : Icons.mic_rounded;
+    final container = AnimatedContainer(
+      duration: const Duration(milliseconds: 160),
+      height: 56,
+      decoration: BoxDecoration(
+        color: listening ? cs.primary : cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      alignment: Alignment.center,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, color: listening ? cs.onPrimary : cs.onSurface, size: 22),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: TextStyle(
+              color: listening ? cs.onPrimary : cs.onSurface,
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
+    if (holdMode) {
+      // Press-and-hold to record, release to stop — no long-press delay.
+      return Listener(
+        onPointerDown: (_) => onHoldStart(),
+        onPointerUp: (_) => onHoldEnd(),
+        onPointerCancel: (_) => onHoldEnd(),
+        child: container,
+      );
+    }
+    return GestureDetector(onTap: onTap, child: container);
   }
 }

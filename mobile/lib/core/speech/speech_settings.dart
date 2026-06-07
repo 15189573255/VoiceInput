@@ -15,6 +15,18 @@ import 'whisper_speech_provider.dart';
 /// streaming WS implementation (currently a stub).
 enum SpeechEngineKind { system, whisper, volcengine }
 
+/// How the mic button arms a recording.
+///   tap  — tap once to start, tap again to stop (the original behaviour).
+///   hold — press and hold to record, release to stop (walkie-talkie style).
+enum MicTriggerMode { tap, hold }
+
+extension MicTriggerModeX on MicTriggerMode {
+  String get wire => this == MicTriggerMode.hold ? 'hold' : 'tap';
+
+  static MicTriggerMode fromWire(String? s) =>
+      s == 'hold' ? MicTriggerMode.hold : MicTriggerMode.tap;
+}
+
 extension SpeechEngineKindX on SpeechEngineKind {
   String get wire {
     switch (this) {
@@ -43,6 +55,8 @@ extension SpeechEngineKindX on SpeechEngineKind {
 
 class SpeechSettings {
   SpeechEngineKind engine;
+  // How the mic button triggers recording (tap-to-toggle vs hold-to-talk).
+  MicTriggerMode micMode;
   // Whisper
   String whisperBaseUrl;
   String whisperApiKey;
@@ -57,6 +71,7 @@ class SpeechSettings {
 
   SpeechSettings({
     this.engine = SpeechEngineKind.system,
+    this.micMode = MicTriggerMode.tap,
     this.whisperBaseUrl = 'https://api.openai.com/v1',
     this.whisperApiKey = '',
     this.whisperModel = 'whisper-1',
@@ -70,6 +85,7 @@ class SpeechSettings {
 
   factory SpeechSettings.fromJson(Map<String, dynamic> j) => SpeechSettings(
         engine: SpeechEngineKindX.fromWire(j['engine'] as String?),
+        micMode: MicTriggerModeX.fromWire(j['micMode'] as String?),
         whisperBaseUrl: j['whisperBaseUrl'] as String? ?? 'https://api.openai.com/v1',
         whisperApiKey: j['whisperApiKey'] as String? ?? '',
         whisperModel: j['whisperModel'] as String? ?? 'whisper-1',
@@ -83,6 +99,7 @@ class SpeechSettings {
 
   Map<String, dynamic> toJson() => {
         'engine': engine.wire,
+        'micMode': micMode.wire,
         'whisperBaseUrl': whisperBaseUrl,
         'whisperApiKey': whisperApiKey,
         'whisperModel': whisperModel,
