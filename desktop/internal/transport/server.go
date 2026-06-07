@@ -52,8 +52,9 @@ type Server struct {
 	upgrader websocket.Upgrader
 	srv      *http.Server
 
-	mu      sync.RWMutex
-	session *session
+	mu       sync.RWMutex
+	sessions map[*session]struct{} // all live clients; the main app and the IME
+	// connect as separate sessions and must coexist instead of displacing.
 }
 
 type session struct {
@@ -69,9 +70,10 @@ type session struct {
 // pairing may be nil for tests that don't need auth.
 func New(port int, bus Bus, pairing *PairingManager) *Server {
 	return &Server{
-		port:    port,
-		bus:     bus,
-		pairing: pairing,
+		port:     port,
+		bus:      bus,
+		pairing:  pairing,
+		sessions: map[*session]struct{}{},
 		upgrader: websocket.Upgrader{
 			CheckOrigin:     func(r *http.Request) bool { return true },
 			ReadBufferSize:  4096,
@@ -104,7 +106,7 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) Stop() error {
-	s.closeSession("server stopping")
+	s.closeAllSessions("server stopping")
 	if s.srv == nil {
 		return nil
 	}
@@ -120,43 +122,44 @@ func (s *Server) Status() Status {
 		LANIPs:  LANIPv4s(),
 	}
 	s.mu.RLock()
-	if s.session != nil {
+	for sess := range s.sessions {
 		st.Connected = true
-		st.Authed = s.session.authed
-		st.ConnectedDevice = s.session.deviceName
-		st.ConnectedDeviceID = s.session.deviceID
-		st.ConnectedAt = s.session.connectedAt
+		st.ConnectedDevice = sess.deviceName
+		st.ConnectedDeviceID = sess.deviceID
+		st.ConnectedAt = sess.connectedAt
+		// Prefer an authed session for the displayed device; any will do.
+		if sess.authed {
+			st.Authed = true
+			break
+		}
 	}
 	s.mu.RUnlock()
 	return st
 }
 
-// Send pushes a server-originated message (e.g. focus/update) to the client.
+// Send pushes a server-originated message (e.g. focus/update) to every client.
 func (s *Server) Send(msg protocol.Message) error {
-	s.mu.RLock()
-	sess := s.session
-	s.mu.RUnlock()
-	if sess == nil {
-		return nil
+	for _, sess := range s.snapshotSessions() {
+		sess.writeMu.Lock()
+		_ = sess.conn.WriteJSON(msg)
+		sess.writeMu.Unlock()
 	}
-	sess.writeMu.Lock()
-	defer sess.writeMu.Unlock()
-	return sess.conn.WriteJSON(msg)
+	return nil
 }
 
 // SendIfAuthed is like Send but skips when the session is still pre-auth.
 // Used by background pushers (snippets snapshot, focus tick) that should not
 // leak data to a not-yet-paired device.
 func (s *Server) SendIfAuthed(msg protocol.Message) error {
-	s.mu.RLock()
-	sess := s.session
-	s.mu.RUnlock()
-	if sess == nil || !sess.authed {
-		return nil
+	for _, sess := range s.snapshotSessions() {
+		if !sess.authed {
+			continue
+		}
+		sess.writeMu.Lock()
+		_ = sess.conn.WriteJSON(msg)
+		sess.writeMu.Unlock()
 	}
-	sess.writeMu.Lock()
-	defer sess.writeMu.Unlock()
-	return sess.conn.WriteJSON(msg)
+	return nil
 }
 
 // OnAuth registers a callback fired the moment a session becomes authed
@@ -171,26 +174,18 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("transport: ws upgrade ok from %s", r.RemoteAddr)
-	s.mu.Lock()
-	if prev := s.session; prev != nil {
-		log.Printf("transport: displacing previous session deviceId=%q", prev.deviceID)
-		_ = prev.conn.WriteJSON(protocol.Message{
-			V: protocol.Version, Type: protocol.TypeError,
-			Data: mustMarshal(protocol.ErrorPayload{Code: "displaced", Message: "another device just connected"}),
-		})
-		_ = prev.conn.Close()
-		s.session = nil
-		if s.pairing != nil {
-			s.pairing.Reset()
-		}
-	}
+	// Clients coexist: the main app and the IME run as separate engines on the
+	// phone and each opens its own session. We deliberately do NOT displace a
+	// previous session here — that "single session, newest wins" rule was what
+	// made the app and the IME endlessly kick each other offline (displaced loop).
 	sess := &session{conn: conn, connectedAt: time.Now()}
-	s.session = sess
+	s.mu.Lock()
+	s.sessions[sess] = struct{}{}
 	s.mu.Unlock()
 	s.publishStatus()
 
 	defer func() {
-		s.closeSession("client disconnected")
+		s.dropSession(sess, "client disconnected")
 	}()
 
 	conn.SetReadLimit(64 * 1024)
@@ -372,21 +367,56 @@ func sendJSON(sess *session, m protocol.Message) {
 	_ = sess.conn.WriteJSON(m)
 }
 
-func (s *Server) closeSession(reason string) {
+// dropSession removes one client. Pairing is reset only once the LAST client
+// leaves, so one of (app, IME) disconnecting doesn't wipe a pairing in progress
+// for the other.
+func (s *Server) dropSession(sess *session, reason string) {
 	s.mu.Lock()
-	sess := s.session
-	s.session = nil
+	_, existed := s.sessions[sess]
+	delete(s.sessions, sess)
+	remaining := len(s.sessions)
 	s.mu.Unlock()
-	if sess != nil {
+	if existed {
 		dur := time.Since(sess.connectedAt).Truncate(time.Second)
 		log.Printf("transport: session closed device=%q reason=%s lasted=%s",
 			sess.deviceName, reason, dur)
+		_ = sess.conn.Close()
+	}
+	if remaining == 0 && s.pairing != nil {
+		s.pairing.Reset()
+	}
+	s.publishStatus()
+}
+
+// closeAllSessions tears down every client (used on server stop).
+func (s *Server) closeAllSessions(reason string) {
+	s.mu.Lock()
+	all := make([]*session, 0, len(s.sessions))
+	for sess := range s.sessions {
+		all = append(all, sess)
+	}
+	s.sessions = map[*session]struct{}{}
+	s.mu.Unlock()
+	for _, sess := range all {
+		log.Printf("transport: session closed device=%q reason=%s", sess.deviceName, reason)
 		_ = sess.conn.Close()
 	}
 	if s.pairing != nil {
 		s.pairing.Reset()
 	}
 	s.publishStatus()
+}
+
+// snapshotSessions copies the live session set so callers can iterate without
+// holding the lock during (blocking) socket writes.
+func (s *Server) snapshotSessions() []*session {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*session, 0, len(s.sessions))
+	for sess := range s.sessions {
+		out = append(out, sess)
+	}
+	return out
 }
 
 func (s *Server) publishStatus() {
