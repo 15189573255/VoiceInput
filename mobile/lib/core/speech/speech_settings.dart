@@ -146,8 +146,13 @@ class SpeechSettingsStore {
   SpeechSettings get current => _current;
   Stream<SpeechSettings> get changes => _ctrl.stream;
 
-  Future<void> load() async {
+  Future<void> load({bool fromDisk = false}) async {
     final p = await SharedPreferences.getInstance();
+    // The IME runs in a separate Flutter engine/isolate from the main app, so
+    // its SharedPreferences cache won't pick up a setting the app saved after
+    // this isolate first read it (e.g. switching tap↔hold). reload() forces a
+    // fresh read from disk so the IME actually sees the change.
+    if (fromDisk) await p.reload();
     final raw = p.getString(_kBlob);
     if (raw == null) return;
     try {

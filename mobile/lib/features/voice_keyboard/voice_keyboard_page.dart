@@ -34,7 +34,7 @@ class VoiceKeyboardPage extends StatefulWidget {
   State<VoiceKeyboardPage> createState() => _VoiceKeyboardPageState();
 }
 
-class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
+class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> with WidgetsBindingObserver {
   final Discovery _discovery = Discovery();
   final SnippetStore _snipStore = SnippetStore();
   final PolishSettingsStore _polishStore = PolishSettingsStore();
@@ -93,12 +93,34 @@ class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _init();
+  }
+
+  // The desktop serves one phone session at a time, so the main app and the
+  // IME (separate engines, same deviceId) would otherwise fight over it and
+  // displace each other in a loop. Yield while backgrounded: disconnect with
+  // no auto-reconnect when we go to the background (the IME likely wants the
+  // connection then), and reclaim it when we come back to the foreground.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (_activeDevice != null && _wsState == WsState.disconnected) {
+        final p = _bestPeer();
+        if (p != null) _ws?.connect(p.host, p.port);
+      }
+    } else if (state == AppLifecycleState.paused) {
+      _ws?.disconnect(intentional: true);
+    }
   }
 
   Future<void> _init() async {
     _tokens = await TokenStore.open();
     _ws = WsClient(tokens: _tokens!);
+    // Let the client re-resolve the target on every reconnect, so a dropped
+    // session follows the desktop across IP changes and uses whichever
+    // transport (mDNS/UDP/manual) is currently surfacing it.
+    _ws!.peerResolver = _bestPeer;
 
     final p = await SharedPreferences.getInstance();
     setState(() {
@@ -217,6 +239,7 @@ class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _safetyTimer?.cancel();
     _bufferCtrl.removeListener(_onBufferChanged);
     _bufferFocus.dispose();
@@ -236,6 +259,24 @@ class _VoiceKeyboardPageState extends State<VoiceKeyboardPage> {
     _bufferCtrl.dispose();
     _pinCtrl.dispose();
     super.dispose();
+  }
+
+  // Freshest address to (re)dial. Prefer a live discovery hit for the desktop
+  // we're bound to (its IP may have changed mid-session), else the active
+  // device's last-known address, else the stored last peer. Returning the
+  // current match is what makes reconnects "multi-path": whichever of
+  // mDNS/UDP/manual is surfacing the desktop right now wins.
+  ({String host, int port})? _bestPeer() {
+    final active = _activeDevice;
+    if (active != null) {
+      for (final d in _devices) {
+        if (d.name == active.name) return (host: d.host, port: d.port);
+      }
+      return (host: active.host, port: active.port);
+    }
+    final peer = _tokens?.lastPeer;
+    if (peer != null) return (host: peer.host, port: peer.port);
+    return null;
   }
 
   Future<void> _connectTo(DiscoveredService svc) async {

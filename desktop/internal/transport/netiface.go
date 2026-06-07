@@ -2,6 +2,7 @@ package transport
 
 import (
 	"net"
+	"strings"
 )
 
 // LANInterface describes one real network interface the desktop should
@@ -32,6 +33,13 @@ func DiscoverLANInterfaces() []LANInterface {
 			continue
 		}
 		if iface.Flags&net.FlagBroadcast == 0 {
+			continue
+		}
+		// The flag + RFC1918 checks alone do NOT exclude VMware / WSL / Hyper-V
+		// adapters — those carry private IPs too (192.168.x from VMnet, 172.x
+		// from WSL), so without this a mobile client can latch onto an
+		// unreachable virtual-NIC address and fail to connect. Drop by name.
+		if isVirtualIface(iface.Name) {
 			continue
 		}
 		addrs, err := iface.Addrs()
@@ -72,6 +80,24 @@ func isRFC1918(ip net.IP) bool {
 		return true
 	case ip[0] == 192 && ip[1] == 168:
 		return true
+	}
+	return false
+}
+
+// isVirtualIface matches adapter names used by VMs, containers, tunnels and
+// proxies. They carry RFC1918 IPs but aren't the user's real LAN, and
+// advertising on them hands mobile clients an unreachable address. (Mirrors the
+// same filter in internal/adbwireless; kept local to avoid a shared dep.)
+func isVirtualIface(name string) bool {
+	n := strings.ToLower(name)
+	for _, bad := range []string{
+		"vmware", "vethernet", "hyper-v", "virtualbox", "vbox",
+		"vpn", "tailscale", "zerotier", "docker", "wsl",
+		"tap", "tun", "loopback", "bluetooth", "wan miniport",
+	} {
+		if strings.Contains(n, bad) {
+			return true
+		}
 	}
 	return false
 }

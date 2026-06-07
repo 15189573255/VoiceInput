@@ -29,7 +29,7 @@ class ImeKeyboardView extends StatefulWidget {
 
 enum _Dest { phone, pc }
 
-class _ImeKeyboardViewState extends State<ImeKeyboardView> {
+class _ImeKeyboardViewState extends State<ImeKeyboardView> with WidgetsBindingObserver {
   final ImeBridge _ime = ImeBridge();
   final SpeechSettingsStore _speechStore = SpeechSettingsStore();
   // Built from the user's saved settings (same SharedPreferences blob the main
@@ -61,8 +61,24 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     debugPrint('[ImeView] initState');
     _init();
+  }
+
+  // Yield the single desktop session to the main app when the keyboard is
+  // hidden, and (re)claim it when shown. The native IME drives this engine's
+  // lifecycle (onWindowShown→resumed / onWindowHidden→inactive), so without
+  // this the IME's background WsClient keeps fighting the main app for the one
+  // allowed session — the displaced loop / "stuck on connecting" bug.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (_dest == _Dest.pc && _wsState != WsState.authed) _connectPc();
+    } else if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused) {
+      _ws?.disconnect(intentional: true);
+    }
   }
 
   Future<void> _init() async {
@@ -78,6 +94,10 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
     _imeSub = _ime.events.listen((e) {
       if (e.kind == ImeEventKind.start) {
         setState(() => _hostApp = e.packageName);
+        // Re-read settings on every keyboard show: the app and the IME are
+        // separate isolates, so a tap/hold or engine change saved in the app
+        // isn't visible here until we reload from disk.
+        _reloadSettings();
       } else {
         setState(() => _hostApp = null);
       }
@@ -88,7 +108,7 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
     // Load the shared speech settings and build the configured engine. The main
     // app and the IME read the same blob, so whatever engine the user picked
     // (e.g. Volcengine streaming) applies to the IME as well.
-    await _speechStore.load();
+    await _speechStore.load(fromDisk: true);
     _speech = _speechStore.current.buildProvider();
     if (mounted) setState(() => _micMode = _speechStore.current.micMode);
     _speechStore.changes.listen((s) {
@@ -97,8 +117,19 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
     });
   }
 
+  // Pull the latest settings from disk and apply the tap/hold + engine choice.
+  // Called on each keyboard show because the IME isolate's SharedPreferences
+  // cache is otherwise stale relative to the main app (separate engines).
+  Future<void> _reloadSettings() async {
+    await _speechStore.load(fromDisk: true);
+    if (!mounted) return;
+    setState(() => _micMode = _speechStore.current.micMode);
+    _speech = _speechStore.current.buildProvider();
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _speechSub?.cancel();
     _speech?.cancel();
     _speechStore.dispose();
@@ -287,7 +318,6 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
       decoration: BoxDecoration(color: Theme.of(context).colorScheme.surface),
       padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
       child: Column(
-        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _TopBar(
@@ -302,10 +332,16 @@ class _ImeKeyboardViewState extends State<ImeKeyboardView> {
             onSwitchKeyboard: () => _ime.showImePicker(),
           ),
           const SizedBox(height: 6),
-          _BufferRow(
-            controller: _bufferCtrl,
-            onClear: () => _bufferCtrl.clear(),
-            onSend: _canSend ? _send : null,
+          // Buffer takes the space between the fixed top bar and mic bar and
+          // scrolls internally, so the panel never overflows its fixed height
+          // (this was the "BOTTOM OVERFLOWED BY N PIXELS" error once the buffer
+          // grew past a couple of lines).
+          Expanded(
+            child: _BufferRow(
+              controller: _bufferCtrl,
+              onClear: () => _bufferCtrl.clear(),
+              onSend: _canSend ? _send : null,
+            ),
           ),
           const SizedBox(height: 6),
           _MicBar(
@@ -401,12 +437,16 @@ class _BufferRow extends StatelessWidget {
       ),
       padding: const EdgeInsets.fromLTRB(10, 4, 4, 4),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(
+            // expands fills the (now flexible) row height and scrolls when the
+            // text outgrows it, instead of pushing the panel past its bounds.
             child: TextField(
               controller: controller,
-              maxLines: 3,
-              minLines: 1,
+              maxLines: null,
+              expands: true,
+              textAlignVertical: TextAlignVertical.top,
               style: const TextStyle(fontSize: 14),
               decoration: InputDecoration(
                 isCollapsed: true,
@@ -415,20 +455,30 @@ class _BufferRow extends StatelessWidget {
               ),
             ),
           ),
-          IconButton(
-            onPressed: controller.text.isEmpty ? null : onClear,
-            icon: const Icon(Icons.backspace_outlined, size: 18),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-            tooltip: tr('buf.clearBuf'),
-          ),
-          FilledButton.icon(
-            onPressed: onSend,
-            icon: const Icon(Icons.send_rounded, size: 16),
-            label: Text(tr('buf.send')),
-            style: FilledButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          // Keep the action buttons at their natural size, pinned to the bottom
+          // of the row instead of being stretched by crossAxisAlignment.stretch.
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  onPressed: controller.text.isEmpty ? null : onClear,
+                  icon: const Icon(Icons.backspace_outlined, size: 18),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  tooltip: tr('buf.clearBuf'),
+                ),
+                FilledButton.icon(
+                  onPressed: onSend,
+                  icon: const Icon(Icons.send_rounded, size: 16),
+                  label: Text(tr('buf.send')),
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  ),
+                ),
+              ],
             ),
           ),
         ],

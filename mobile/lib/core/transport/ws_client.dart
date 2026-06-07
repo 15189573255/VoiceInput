@@ -43,7 +43,13 @@ class WsClient {
   bool _displaced = false;
   int _reconnectAttempts = 0;
   Timer? _reconnectTimer;
-  static const _maxReconnects = 3;
+
+  // Optional hook the UI installs so each reconnect re-targets the freshest
+  // known address (newest discovery hit, else the active device, else the
+  // stored last peer) instead of being stuck on the address first dialed.
+  // This is what makes reconnects follow the desktop across an IP change
+  // (DHCP renew, Wi-Fi roam) and pick whichever transport (mDNS/UDP) is live.
+  ({String host, int port})? Function()? peerResolver;
 
   WsClient({required this.tokens, this.deviceName = 'Mobile'});
 
@@ -205,17 +211,23 @@ class WsClient {
     //   - server's "latest-wins" temporarily kicked us;
     //   - Wi-Fi roamed / momentarily dropped;
     //   - desktop process briefly restarted.
-    if (_wasAuthed && !_displaced && host != null && port != null && _reconnectAttempts < _maxReconnects) {
+    if (_wasAuthed && !_displaced && host != null && port != null) {
       _reconnectAttempts++;
-      final delayMs = 600 * _reconnectAttempts;
+      // Exponential backoff capped at 8s, retried indefinitely: a brief outage
+      // (Wi-Fi roam, desktop restart) should recover on its own rather than
+      // giving up after a few tries and stranding the user mid-dictation.
+      final step = _reconnectAttempts.clamp(1, 5);
+      final delayMs = (400 * (1 << step)).clamp(800, 8000);
       _log('reconnect scheduled #$_reconnectAttempts in ${delayMs}ms');
       _reconnectTimer?.cancel();
       _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
-        if (_state == WsState.disconnected) {
-          connect(host, port).catchError((e) {
-            _log('reconnect attempt failed: $e');
-          });
-        }
+        if (_state != WsState.disconnected) return;
+        // Re-target to the freshest known address if the UI gave us a resolver,
+        // so we follow the desktop if its IP changed while we were down.
+        final p = peerResolver?.call();
+        connect(p?.host ?? host, p?.port ?? port).catchError((e) {
+          _log('reconnect attempt failed: $e');
+        });
       });
     } else {
       _wasAuthed = false;
