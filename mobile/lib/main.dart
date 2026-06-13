@@ -33,6 +33,62 @@ void imeMain() {
   debugPrint('[imeMain] runApp returned');
 }
 
+/// PoC entrypoint (iOS keyboard-extension memory probe). Renders the smallest
+/// possible always-animating Flutter UI so the embedding extension can measure
+/// what a live FlutterEngine costs against the jetsam limit. Kept in this
+/// library next to `main`/`imeMain` so the AOT compiler does not tree-shake the
+/// @pragma-annotated entrypoint away.
+@pragma('vm:entry-point')
+void pocFlutterMain() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const _PocApp());
+}
+
+class _PocApp extends StatelessWidget {
+  const _PocApp();
+  @override
+  Widget build(BuildContext context) => const MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(
+          backgroundColor: Color(0xFF101014),
+          body: Center(child: _PocHeartbeat()),
+        ),
+      );
+}
+
+class _PocHeartbeat extends StatefulWidget {
+  const _PocHeartbeat();
+  @override
+  State<_PocHeartbeat> createState() => _PocHeartbeatState();
+}
+
+class _PocHeartbeatState extends State<_PocHeartbeat> {
+  int _ticks = 0;
+  Timer? _t;
+  @override
+  void initState() {
+    super.initState();
+    // A steady repaint proves the isolate is alive and the raster pipeline is
+    // resident — i.e. this is real engine memory, not a one-shot warm frame.
+    _t = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted) setState(() => _ticks++);
+    });
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(
+        'Flutter alive in keyboard ext\ntick: $_ticks',
+        textAlign: TextAlign.center,
+        style: const TextStyle(color: Colors.white, fontSize: 18),
+      );
+}
+
 class VoiceInputApp extends StatelessWidget {
   const VoiceInputApp({super.key});
 

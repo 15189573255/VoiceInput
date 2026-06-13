@@ -10,7 +10,11 @@ mobile/android/.gradle/
 mobile/android/.kotlin/
 mobile/android/local.properties
 mobile/android/app/build/
-mobile/ios/
+# mobile/ios/ was fully ignored while the project was Android-only. iOS is now a
+# real target (PoC keyboard extensions), so rely on Flutter's own
+# mobile/ios/.gitignore to exclude build artifacts while keeping sources tracked.
+mobile/ios/build/
+mobile/ios/Pods/
 *.exe
 *.apk
 *.aab
