@@ -1,10 +1,10 @@
-//go:build !windows
+//go:build !windows && !darwin
 
 package focus
 
-// Stub for macOS / Linux. The production implementations:
-//   macOS:  NSWorkspace.shared.frontmostApplication.localizedName / bundleIdentifier
-//   Linux:  Xlib _NET_ACTIVE_WINDOW (X11) or wlr-foreign-toplevel-management (Wayland)
+// Stub for Linux (macOS is implemented in focus_darwin.go). The production
+// implementation would use Xlib _NET_ACTIVE_WINDOW (X11) or
+// wlr-foreign-toplevel-management (Wayland).
 
 type stubDetector struct{}
 

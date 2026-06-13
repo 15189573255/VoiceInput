@@ -17,8 +17,14 @@ package inject
 import "errors"
 
 // ErrUnsupportedPlatform is returned by injector methods on platforms that do
-// not yet have a real implementation (currently macOS and Linux are stubs).
+// not yet have a real implementation (currently Linux is a stub).
 var ErrUnsupportedPlatform = errors.New("text injection is not implemented for this platform yet")
+
+// ErrAccessibilityNotTrusted is returned by the macOS injector when the app has
+// not been granted Accessibility permission, which CGEventPost requires to
+// deliver synthetic keyboard events. The user must enable it under
+// System Settings → Privacy & Security → Accessibility.
+var ErrAccessibilityNotTrusted = errors.New("accessibility permission not granted: enable this app under System Settings → Privacy & Security → Accessibility")
 
 type Mode int
 
